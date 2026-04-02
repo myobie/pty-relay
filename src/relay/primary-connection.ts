@@ -1,0 +1,171 @@
+import WebSocket from "ws";
+
+export interface RelayEvent {
+  seq: number;
+  event_type: string;
+  sender_key_id?: string;
+  payloads?: Record<string, string>;
+}
+
+export interface ClientConnectMeta {
+  remote_addr?: string | null;
+  user_agent?: string | null;
+  origin?: string | null;
+}
+
+export interface PrimaryRelayEvents {
+  onConnected: () => void;
+  onClientWaiting: (
+    clientId: string,
+    clientToken?: string,
+    meta?: ClientConnectMeta
+  ) => void;
+  onClientDisconnected: (clientId: string) => void;
+  onEvent?: (event: RelayEvent) => void;
+  onError: (error: Error) => void;
+  onClose: (code?: number) => void;
+}
+
+/**
+ * The daemon's primary control WebSocket to the relay.
+ * This does NOT do Noise NK handshake -- it only handles text control messages.
+ *
+ * The daemon does not send pings — clients are responsible for keepalive.
+ *
+ * Messages received:
+ * - {"type":"client_waiting","client_id":"abc"} -> onClientWaiting
+ * - {"type":"client_disconnected","client_id":"abc"} -> onClientDisconnected
+ * - {"type":"error","message":"..."} -> onError
+ * - {"type":"draining"} -> reconnect
+ *
+ * The daemon should respond to onClientWaiting by opening a new RelayConnection
+ * with client_id in the URL for each waiting client.
+ */
+export class PrimaryRelayConnection {
+  private ws: WebSocket | null = null;
+  private wsUrlFactory: string | (() => string);
+  private events: PrimaryRelayEvents;
+  private closed = false;
+
+  constructor(wsUrl: string | (() => string), events: PrimaryRelayEvents) {
+    this.wsUrlFactory = wsUrl;
+    this.events = events;
+  }
+
+  /** Connect to the relay as the primary daemon control socket. */
+  connect(): void {
+    this.closed = false;
+
+    const url =
+      typeof this.wsUrlFactory === "function"
+        ? this.wsUrlFactory()
+        : this.wsUrlFactory;
+
+    this.ws = new WebSocket(url);
+    this.ws.binaryType = "nodebuffer";
+
+    this.ws.on("open", () => {
+      this.events.onConnected();
+    });
+
+    this.ws.on("message", (data: Buffer | string, isBinary: boolean) => {
+      // Primary connection only handles text messages
+      if (!isBinary) {
+        const text = typeof data === "string" ? data : data.toString("utf-8");
+        this.handleTextMessage(text);
+      }
+    });
+
+    this.ws.on("close", (code: number) => {
+      if (!this.closed) {
+        this.events.onClose(code);
+      }
+    });
+
+    this.ws.on("error", (err: Error) => {
+      this.events.onError(err);
+    });
+  }
+
+  /** Close the connection. */
+  close(): void {
+    this.closed = true;
+    this.ws?.close();
+    this.ws = null;
+  }
+
+  /** Send a text frame on the primary WebSocket. */
+  sendText(text: string): void {
+    if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+      this.ws.send(text);
+    }
+  }
+
+  /** Check if the connection is open. */
+  isConnected(): boolean {
+    return this.ws !== null && this.ws.readyState === WebSocket.OPEN;
+  }
+
+  /** Send a sync message to catch up on events since the given cursor. */
+  sendSync(cursor: number): void {
+    this.sendText(JSON.stringify({ type: "sync", cursor }));
+  }
+
+  /** Emit a custom event to the relay's event log. */
+  sendEvent(eventType: string, payload: Record<string, unknown>): void {
+    this.sendText(JSON.stringify({
+      type: "emit_event",
+      event_type: eventType,
+      payload,
+    }));
+  }
+
+  // -- Message Handling --
+
+  private handleTextMessage(text: string): void {
+    try {
+      const msg = JSON.parse(text);
+
+      switch (msg.type) {
+        case "client_waiting":
+          if (msg.client_id) {
+            this.events.onClientWaiting(
+              msg.client_id,
+              msg.client_token,
+              msg.meta
+            );
+          }
+          break;
+
+        case "client_disconnected":
+          if (msg.client_id) {
+            this.events.onClientDisconnected(msg.client_id);
+          }
+          break;
+
+        case "error":
+          this.events.onError(new Error(msg.message || "Relay error"));
+          break;
+
+        case "event":
+          if (this.events.onEvent && typeof msg.seq === "number") {
+            this.events.onEvent({
+              seq: msg.seq,
+              event_type: msg.event_type,
+              sender_key_id: msg.sender_key_id,
+              payloads: msg.payloads,
+            });
+          }
+          break;
+
+        case "draining":
+          // Server is draining, reconnect
+          this.close();
+          this.events.onClose(1012);
+          break;
+      }
+    } catch {
+      // Ignore unparseable text
+    }
+  }
+}

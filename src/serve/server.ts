@@ -1,0 +1,150 @@
+import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
+import { WebSocketServer, type WebSocket } from "ws";
+import { PairingRegistry } from "./pairing.ts";
+import * as fs from "node:fs";
+import * as path from "node:path";
+import { URL } from "node:url";
+
+/**
+ * Self-hosted relay server. Same WebSocket protocol as the Elixir relay --
+ * clients can't tell the difference. No auth, no database, no email.
+ * Designed for local networks and tailscale.
+ *
+ * Multi-client model:
+ * - daemon connects with role=daemon (no client_id) -> primary control socket
+ * - client connects with role=client -> gets assigned a client_id
+ * - daemon connects with role=daemon&client_id=X -> per-client data socket
+ */
+export function createRelayServer(port: number, htmlPath?: string) {
+  const registry = new PairingRegistry();
+
+  // Read HTML for web UI serving
+  let html = "<html><body>pty-relay self-hosted</body></html>";
+  if (htmlPath && fs.existsSync(htmlPath)) {
+    html = fs.readFileSync(htmlPath, "utf-8");
+  }
+
+  // Directory containing the built web UI (index.html, main.js, vendor/).
+  const distDir = htmlPath ? path.dirname(htmlPath) : null;
+
+  const httpServer = createServer((req: IncomingMessage, res: ServerResponse) => {
+    const url = new URL(req.url || "/", `http://localhost:${port}`);
+
+    if (url.pathname === "/health") {
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end('{"status":"ok"}');
+    } else if (url.pathname.startsWith("/vendor/")) {
+      // Serve vendor files — validate path stays within vendor directory
+      const vendorDir = path.resolve(distDir ?? ".", "vendor");
+      const vendorPath = path.resolve(vendorDir, path.basename(url.pathname));
+      if (vendorPath.startsWith(vendorDir + path.sep) && fs.existsSync(vendorPath)) {
+        const ext = path.extname(vendorPath);
+        const ct = ext === ".mjs" ? "application/javascript" : ext === ".css" ? "text/css" : "application/octet-stream";
+        res.writeHead(200, { "Content-Type": ct });
+        fs.createReadStream(vendorPath).pipe(res);
+      } else {
+        res.writeHead(404);
+        res.end("Not found");
+      }
+    } else if (url.pathname === "/main.js" && distDir) {
+      // Serve the bundled browser entrypoint produced by `npm run build:browser`.
+      const mainPath = path.resolve(distDir, "main.js");
+      if (
+        mainPath.startsWith(distDir + path.sep) &&
+        fs.existsSync(mainPath)
+      ) {
+        res.writeHead(200, { "Content-Type": "application/javascript" });
+        fs.createReadStream(mainPath).pipe(res);
+      } else {
+        res.writeHead(404);
+        res.end("Not found");
+      }
+    } else {
+      // Serve web UI for everything else
+      res.writeHead(200, { "Content-Type": "text/html" });
+      res.end(html);
+    }
+  });
+
+  const wss = new WebSocketServer({ server: httpServer, path: "/ws" });
+
+  wss.on("connection", (ws: WebSocket, req: IncomingMessage) => {
+    const url = new URL(req.url || "/", `http://localhost:${port}`);
+    const role = url.searchParams.get("role");
+    const secretHash = url.searchParams.get("secret_hash");
+    const clientId = url.searchParams.get("client_id");
+    const label = url.searchParams.get("label");
+    const clientToken = url.searchParams.get("client_token");
+
+    if (!role || !secretHash || (role !== "daemon" && role !== "client")) {
+      ws.close(4000, "invalid params");
+      return;
+    }
+
+    if (secretHash.length !== 64) {
+      ws.close(4000, "invalid secret_hash");
+      return;
+    }
+
+    if (role === "daemon" && clientId) {
+      // Per-client daemon socket: pair with an existing waiting client
+      const ok = registry.registerDaemonForClient(secretHash, clientId, ws);
+      if (!ok) {
+        ws.send(JSON.stringify({ type: "error", message: "client not found" }));
+        ws.close();
+      }
+    } else if (role === "daemon") {
+      // Primary daemon control socket
+      const ok = registry.registerDaemon(secretHash, ws, label);
+      if (!ok) {
+        ws.send(JSON.stringify({ type: "error", message: "secret_hash already registered" }));
+        ws.close();
+      }
+    } else {
+      // Client connection — capture network metadata for the approval queue
+      const forwarded = req.headers["x-forwarded-for"];
+      const forwardedStr = Array.isArray(forwarded)
+        ? forwarded[0]
+        : forwarded;
+      const remoteAddr =
+        (forwardedStr ? forwardedStr.split(",")[0].trim() : null) ||
+        req.socket.remoteAddress ||
+        null;
+      const userAgentHeader = req.headers["user-agent"];
+      const userAgent =
+        typeof userAgentHeader === "string" ? userAgentHeader : null;
+      const originHeader = req.headers["origin"];
+      const origin =
+        typeof originHeader === "string" ? originHeader : null;
+
+      const id = registry.registerClient(
+        secretHash,
+        ws,
+        clientToken ?? undefined,
+        { remoteAddr, userAgent, origin }
+      );
+      if (id === null) {
+        ws.send(JSON.stringify({ type: "error", message: "no daemon available" }));
+        ws.close();
+      }
+    }
+  });
+
+  return {
+    start(): Promise<void> {
+      return new Promise((resolve, reject) => {
+        httpServer.on("error", reject);
+        httpServer.listen(port, () => resolve());
+      });
+    },
+
+    stop(): Promise<void> {
+      return new Promise((resolve) => {
+        wss.close();
+        httpServer.close(() => resolve());
+      });
+    },
+
+    port,
+  };
+}

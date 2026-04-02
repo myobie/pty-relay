@@ -1,0 +1,46 @@
+{
+  "name": "@myobie/pty-relay",
+  "version": "0.1.0",
+  "description": "Remote access to pty sessions over an end-to-end encrypted WebSocket tunnel",
+  "license": "MIT",
+  "type": "module",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/myobie/pty-relay"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "files": [
+    "src",
+    "browser"
+  ],
+  "bin": {
+    "pty-relay": "./src/cli.ts"
+  },
+  "scripts": {
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:integration": "vitest run --config integration/vitest.config.ts",
+    "test:web": "npx playwright test --config integration/playwright.config.ts",
+    "build:browser": "node browser/build.mjs"
+  },
+  "peerDependencies": {
+    "@myobie/pty": ">=0.8.0"
+  },
+  "dependencies": {
+    "libsodium-wrappers-sumo": "^0.8.2",
+    "ws": "^8.18.0"
+  },
+  "optionalDependencies": {
+    "@napi-rs/keyring": "^1.2.0"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.59.1",
+    "@types/libsodium-wrappers-sumo": "^0.7.8",
+    "@types/ws": "^8.5.0",
+    "esbuild": "^0.27.4",
+    "typescript": "^5.7.0",
+    "vitest": "^3.0.0"
+  }
+}

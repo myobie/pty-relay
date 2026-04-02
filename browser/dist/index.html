@@ -1,0 +1,227 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, interactive-widget=resizes-content">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <title>pty relay</title>
+  <link rel="stylesheet" href="/vendor/xterm.css">
+  <script type="importmap">
+  { "imports": {
+    "@xterm/xterm": "/vendor/xterm.mjs",
+    "@xterm/addon-fit": "/vendor/addon-fit.mjs",
+    "libsodium-sumo": "/vendor/libsodium-sumo.mjs",
+    "libsodium-wrappers-sumo": "/vendor/libsodium-wrappers-sumo.mjs"
+  } }
+  </script>
+  <style>
+    :root {
+      --vh: 100vh;
+      --bg: #0a0a0a;
+      --fg: #e0e0e0;
+      --accent: #4a9eff;
+      --bar-bg: #111;
+      --btn-bg: #333;
+      --btn-active: #668;
+      --btn-locked: #88a;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      background: var(--bg);
+      color: var(--fg);
+      font-family: 'SF Mono', 'Menlo', 'Consolas', 'Monaco', monospace;
+      height: var(--vh);
+      overflow: hidden;
+      display: flex;
+      flex-direction: column;
+    }
+
+    /* --- Session List --- */
+    #session-list {
+      display: none;
+      flex-direction: column;
+      height: var(--vh);
+      padding: 20px;
+      overflow-y: auto;
+    }
+    #session-list h1 {
+      font-size: 13px;
+      margin-bottom: 16px;
+      color: var(--accent);
+      text-transform: uppercase;
+      letter-spacing: 1px;
+    }
+    .session-card {
+      background: #111;
+      border-radius: 0;
+      padding: 14px 16px;
+      margin-bottom: 10px;
+      cursor: pointer;
+      border: 1px solid #333;
+    }
+    .session-card:active { background: #1a1a1a; }
+    .session-card .name { font-weight: normal; font-size: 15px; color: #e0e0e0; }
+    .session-card .meta { font-size: 13px; color: #666; margin-top: 4px; }
+    .session-card .status {
+      display: inline-block;
+      width: 8px; height: 8px;
+      border-radius: 50%;
+      background: #4caf50;
+      margin-right: 6px;
+      vertical-align: middle;
+    }
+
+    /* --- Terminal --- */
+    #terminal-view {
+      display: none;
+      flex-direction: column;
+      height: var(--vh);
+    }
+    #toolbar {
+      display: flex;
+      align-items: center;
+      padding: 6px 12px;
+      background: #111;
+      border-bottom: 1px solid #333;
+      min-height: 36px;
+    }
+    #toolbar .session-name {
+      flex: 1;
+      font-size: 13px;
+      font-weight: normal;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    #toolbar button {
+      background: var(--btn-bg);
+      color: var(--fg);
+      border: none;
+      border-radius: 2px;
+      padding: 4px 10px;
+      font-size: 12px;
+      cursor: pointer;
+    }
+    #terminal-container {
+      flex: 1;
+      overflow: hidden;
+    }
+
+    /* --- Mobile Keyboard --- */
+    #keyboard {
+      background: #111;
+      border-top: 1px solid #333;
+    }
+    #quick-bar {
+      display: flex;
+      overflow-x: auto;
+      padding: 4px 6px;
+      gap: 4px;
+      -webkit-overflow-scrolling: touch;
+    }
+    #quick-bar::-webkit-scrollbar { display: none; }
+    .kb-btn {
+      background: var(--btn-bg);
+      color: var(--fg);
+      border: none;
+      border-radius: 2px;
+      padding: 6px 10px;
+      font-size: 13px;
+      white-space: nowrap;
+      cursor: pointer;
+      flex-shrink: 0;
+      min-width: 36px;
+      text-align: center;
+      -webkit-user-select: none;
+      user-select: none;
+    }
+    .kb-btn.active { background: var(--btn-active); color: #fff; }
+    .kb-btn.locked { background: var(--btn-locked); color: #fff; }
+    #key-panel {
+      display: none;
+      grid-template-columns: repeat(6, 1fr);
+      gap: 4px;
+      padding: 6px;
+    }
+    #text-input-bar {
+      display: none;
+      padding: 6px;
+      gap: 6px;
+    }
+    #text-input-bar input {
+      flex: 1;
+      background: #1a1a1a;
+      color: var(--fg);
+      border: 1px solid #333;
+      border-radius: 2px;
+      padding: 6px 10px;
+      font-size: 14px;
+      outline: none;
+    }
+    #text-input-bar button {
+      background: var(--accent);
+      color: #fff;
+      border: none;
+      border-radius: 2px;
+      padding: 6px 14px;
+      font-size: 14px;
+      cursor: pointer;
+    }
+
+    /* --- Loading / Error --- */
+    #status-overlay {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      height: var(--vh);
+      font-size: 15px;
+      color: #666;
+    }
+
+    /* --- Floating reopen keyboard button --- */
+    #kb-reopen {
+      display: none;
+      position: fixed;
+      bottom: 12px;
+      right: 12px;
+      background: var(--btn-bg);
+      color: var(--fg);
+      border: none;
+      border-radius: 2px;
+      width: 44px;
+      height: 44px;
+      font-size: 20px;
+      cursor: pointer;
+      z-index: 10;
+    }
+  </style>
+</head>
+<body>
+  <div id="status-overlay">Connecting...</div>
+
+  <div id="session-list">
+    <h1>Sessions</h1>
+    <div id="sessions-container"></div>
+  </div>
+
+  <div id="terminal-view">
+    <div id="toolbar">
+      <span class="session-name" id="session-name-label"></span>
+      <button id="detach-btn">Detach</button>
+    </div>
+    <div id="terminal-container"></div>
+    <div id="keyboard">
+      <div id="quick-bar"></div>
+      <div id="key-panel"></div>
+      <div id="text-input-bar">
+        <input type="text" id="text-input" autocorrect="on" autocapitalize="sentences" placeholder="Type command...">
+        <button id="text-send-btn">Send</button>
+        <button id="text-back-btn" class="kb-btn">Bar</button>
+      </div>
+    </div>
+  </div>
+  <button id="kb-reopen">&#9000;</button>
+
+  <script type="module" src="./main.js"></script>
+</body>
+</html>
