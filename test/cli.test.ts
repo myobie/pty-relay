@@ -35,14 +35,15 @@ describe("CLI", () => {
   it("usage text lists available commands", () => {
     const { stdout } = runCli(["notacommand"]);
     expect(stdout).toContain("connect");
-    expect(stdout).toContain("serve");
+    expect(stdout).toContain("start");
     expect(stdout).toContain("set-name");
     expect(stdout).toContain("ls");
   });
 
-  it("connect requires a token-url argument", () => {
+  it("connect requires a token-url or host-label argument", () => {
     const { stderr, exitCode } = runCli(["connect"]);
-    expect(stderr).toContain("Usage: pty-relay connect <token-url>");
+    expect(stderr).toContain("Usage: pty-relay connect");
+    expect(stderr).toContain("token-url");
     expect(exitCode).toBe(1);
   });
 
@@ -68,11 +69,13 @@ describe("CLI", () => {
   });
 
   it("`<command> --help` prints help instead of running the command", () => {
-    // Regression for the case where `pty-relay serve --help` would parse
-    // `--help` as a port, fall back to 8099, and actually boot the server.
-    const { stdout, exitCode } = runCli(["serve", "--help"]);
+    // Regression for the case where `pty-relay local --help` would try to
+    // run the self-hosted daemon. Our namespace dispatch should print the
+    // local-namespace usage and exit cleanly without touching the config
+    // store or the filesystem.
+    const { stdout, exitCode } = runCli(["local", "--help"]);
     expect(exitCode).toBe(0);
-    expect(stdout).toContain("Commands:");
+    expect(stdout).toContain("start");
     expect(stdout).not.toContain("Token URL");
   });
 
@@ -118,6 +121,7 @@ describe("CLI", () => {
     expect(stdout).toContain("Config files:");
     expect(stdout).toContain("Environment variables:");
     expect(stdout).toContain("Daemon:");
+    expect(stdout).toContain("Public relay:");
   });
 
   it("doctor does not leak secret env vars", () => {

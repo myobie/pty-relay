@@ -170,10 +170,15 @@ export async function clientsApprove(
 
 /**
  * Revoke a client token (active or pending).
+ *
+ * Prompts for y/N before the write (revocation is irreversible: the
+ * token stays in the store marked "revoked" so a compromised copy
+ * can't re-authenticate). `--yes` or setting `opts.yes` skips the
+ * prompt for scripting.
  */
 export async function clientsRevoke(
   idOrPrefix: string,
-  opts: CmdOpts = {}
+  opts: CmdOpts & { yes?: boolean } = {}
 ): Promise<void> {
   const { store } = await openSecretStore(opts.configDir, {
     interactive: true,
@@ -192,6 +197,17 @@ export async function clientsRevoke(
     process.exit(1);
   }
 
+  if (!opts.yes) {
+    const label = token.label || "(unlabeled)";
+    console.log("About to revoke:");
+    console.log(`  ${label}  status=${token.status}  id=${token.id.slice(0, 8)}`);
+    const answer = (await promptStdinLine("Proceed? [y/N] ")).trim().toLowerCase();
+    if (answer !== "y" && answer !== "yes") {
+      console.log("Aborted.");
+      process.exit(0);
+    }
+  }
+
   token.status = "revoked";
   token.revoked_at = new Date().toISOString();
   token.client_id = null;
@@ -199,6 +215,27 @@ export async function clientsRevoke(
 
   const signaled = signalDaemon(opts.configDir);
   console.log(`Revoked token ${token.id.slice(0, 8)}${signaled ? "" : " (daemon not running)"}`);
+}
+
+function promptStdinLine(label: string): Promise<string> {
+  return new Promise<string>((resolve) => {
+    process.stdout.write(label);
+    let buf = "";
+    const onData = (chunk: string) => {
+      buf += chunk;
+      const nl = buf.indexOf("\n");
+      if (nl !== -1) {
+        process.stdin.off("data", onData);
+        process.stdin.pause();
+        process.stdin.unref();
+        resolve(buf.slice(0, nl).replace(/\r$/u, ""));
+      }
+    };
+    process.stdin.ref();
+    process.stdin.resume();
+    process.stdin.setEncoding("utf8");
+    process.stdin.on("data", onData);
+  });
 }
 
 /**

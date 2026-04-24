@@ -24,7 +24,18 @@ export interface PrimaryRelayEvents {
   onEvent?: (event: RelayEvent) => void;
   onError: (error: Error) => void;
   onClose: (code?: number) => void;
+  /** Called when the relay sends a `{"type":"revoked"}` frame or closes
+   *  with code 4001. Revocation is terminal: the daemon should tear
+   *  down, surface a clear message to the operator, and NOT auto-
+   *  reconnect with this key (the key is no longer valid on the relay).
+   *  Optional — callers that don't provide it fall back to onClose +
+   *  the daemon's default reconnect loop, which will loop on 401. */
+  onRevoked?: () => void;
 }
+
+/** Close code the relay uses when terminating sockets for a revoked
+ *  key or a deleted account. */
+export const REVOKED_CLOSE_CODE = 4001;
 
 /**
  * The daemon's primary control WebSocket to the relay.
@@ -162,6 +173,15 @@ export class PrimaryRelayConnection {
           // Server is draining, reconnect
           this.close();
           this.events.onClose(1012);
+          break;
+
+        case "revoked":
+          // Relay is about to close this socket with code 4001 because
+          // the key was revoked (or the account was deleted). Surface
+          // the fact to the daemon BEFORE the close event fires so the
+          // reconnect loop has a chance to short-circuit. The close
+          // listener will still fire with code 4001 afterwards.
+          this.events.onRevoked?.();
           break;
       }
     } catch {

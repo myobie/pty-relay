@@ -1,6 +1,9 @@
 import { ready } from "../crypto/index.ts";
-import { loadKnownHosts } from "../relay/known-hosts.ts";
-import { tagRemoteSession } from "../relay/relay-client.ts";
+import {
+  tagRemoteSession,
+  tagPublicRemoteSession,
+} from "../relay/relay-client.ts";
+import { resolveHost } from "../relay/host-resolve.ts";
 import { openSecretStore } from "../storage/bootstrap.ts";
 
 export async function tag(
@@ -20,18 +23,19 @@ export async function tag(
     interactive: true,
     passphraseFile: opts.passphraseFile,
   });
-  const hosts = await loadKnownHosts(store);
-  const host = hosts.find((h) => h.label === hostLabel);
-  if (!host) {
-    console.error(`No known host with label "${hostLabel}".`);
-    console.error("Run 'pty-relay ls' to see host labels.");
+  let resolved;
+  try {
+    resolved = await resolveHost(hostLabel, store);
+  } catch (err: any) {
+    console.error(err?.message ?? err);
     process.exit(1);
   }
 
-  const result = await tagRemoteSession(host.url, session, {
-    set: opts.set,
-    remove: opts.remove,
-  });
+  const tagOpts = { set: opts.set, remove: opts.remove };
+  const result =
+    resolved.kind === "public"
+      ? await tagPublicRemoteSession(resolved.target, session, tagOpts)
+      : await tagRemoteSession(resolved.url, session, tagOpts);
 
   if (opts.json) {
     console.log(JSON.stringify(result.tags, null, 2));

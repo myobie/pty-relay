@@ -128,6 +128,63 @@ export async function doctorCommand(opts: {
   }
   lines.push("");
 
+  // ── Public-relay enrollment (if any) ──
+  // Tries to read the public_account secret via the normal store.
+  // Only works if the operator supplied a passphrase (or the keychain
+  // backend is in use) — otherwise we'd have to prompt, which doctor
+  // shouldn't do. Silent when it can't read; that's fine for a
+  // diagnostic tool.
+  lines.push("Public relay:");
+  try {
+    const { openSecretStore } = await import("../storage/bootstrap.ts");
+    const { loadPublicAccount } = await import("../storage/public-account.ts");
+    const { store } = await openSecretStore(configDir, {
+      interactive: false,
+    });
+    const account = await loadPublicAccount(store);
+    if (!account) {
+      lines.push("  (not enrolled on any public relay)");
+    } else {
+      lines.push(`  relay:       ${account.relayUrl}`);
+      lines.push(`  email:       ${account.email || "(unknown)"}`);
+      lines.push(`  account id:  ${account.accountId || "(unknown)"}`);
+      lines.push(`  label:       ${account.label}`);
+      lines.push(
+        `  TOTP:        ${account.totpSecretB32 ? "owned on this device" : "managed elsewhere"}`
+      );
+      if (account.daemonKey) {
+        lines.push(`  daemon key:  ${account.daemonKey.signingKeys.public}`);
+        lines.push(`    enrolled:  ${account.daemonKey.enrolledAt}`);
+        if (account.daemonKey.pendingRotation) {
+          lines.push(
+            `    rotation:  pending since ${account.daemonKey.pendingRotation.startedAt}`
+          );
+        }
+      } else {
+        lines.push(`  daemon key:  (none)`);
+      }
+      if (account.clientKey) {
+        lines.push(`  client key:  ${account.clientKey.signingKeys.public}`);
+        lines.push(`    enrolled:  ${account.clientKey.enrolledAt}`);
+        if (account.clientKey.pendingRotation) {
+          lines.push(
+            `    rotation:  pending since ${account.clientKey.pendingRotation.startedAt}`
+          );
+        }
+      } else {
+        lines.push(`  client key:  (none)`);
+      }
+    }
+  } catch (err: any) {
+    // Not an error for doctor's purposes — the encrypted store needs
+    // a passphrase, and a read-only diagnostic shouldn't prompt.
+    lines.push(
+      `  (can't read without a passphrase; try ` +
+        `PTY_RELAY_PASSPHRASE=... pty-relay server status)`
+    );
+  }
+  lines.push("");
+
   console.log(lines.join("\n"));
 }
 
@@ -206,7 +263,6 @@ function checkTailscale(): string {
 async function checkKeychain(): Promise<string> {
   // Dynamically import to check availability without forcing a hard dep.
   try {
-    // @ts-expect-error optional dependency
     const mod = await import("@napi-rs/keyring");
     const Entry = mod.Entry ?? mod.default?.Entry;
     if (typeof Entry !== "function") {

@@ -1,4 +1,9 @@
-export type SecretName = "config" | "clients" | "hosts" | "auth";
+export type SecretName =
+  | "config"
+  | "clients"
+  | "hosts"
+  | "auth"
+  | "public_account";
 
 export interface SecretStore {
   readonly backend: "keychain" | "passphrase";
@@ -34,5 +39,7 @@ export function secretFilename(name: SecretName): string {
       return "hosts";
     case "auth":
       return "auth.json";
+    case "public_account":
+      return "public-account.json";
   }
 }

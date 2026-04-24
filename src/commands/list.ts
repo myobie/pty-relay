@@ -3,7 +3,8 @@ import {
   parseToken,
   computeSecretHash,
   getWebSocketUrl,
-  InitiatorHandshake,
+  Handshake,
+  NK,
   Transport,
 } from "../crypto/index.ts";
 import WebSocket from "ws";
@@ -19,8 +20,7 @@ export async function list(tokenUrl: string): Promise<void> {
     const ws = new WebSocket(wsUrl);
     ws.binaryType = "nodebuffer";
 
-    let handshake: ReturnType<typeof InitiatorHandshake.prototype.readWelcome> | null = null;
-    let initiator: InstanceType<typeof InitiatorHandshake> | null = null;
+    let initiator: Handshake | null = null;
     let transport: Transport | null = null;
 
     ws.onopen = () => {};
@@ -29,8 +29,12 @@ export async function list(tokenUrl: string): Promise<void> {
       if (typeof event.data === "string") {
         const msg = JSON.parse(event.data);
         if (msg.type === "paired") {
-          initiator = new InitiatorHandshake(parsed.publicKey);
-          ws.send(initiator.writeHello());
+          initiator = new Handshake({
+            pattern: NK,
+            initiator: true,
+            remoteStaticPublicKey: parsed.publicKey,
+          });
+          ws.send(initiator.writeMessage());
         } else if (msg.type === "error") {
           console.error(`Error: ${msg.message}`);
           ws.close();
@@ -40,8 +44,8 @@ export async function list(tokenUrl: string): Promise<void> {
         const data = Buffer.isBuffer(event.data) ? event.data : Buffer.from(event.data as ArrayBuffer);
 
         if (!transport && initiator) {
-          const result = initiator.readWelcome(new Uint8Array(data));
-          transport = new Transport(result);
+          initiator.readMessage(new Uint8Array(data));
+          transport = new Transport(initiator.split());
           initiator = null;
 
           // Send list request
@@ -49,7 +53,18 @@ export async function list(tokenUrl: string): Promise<void> {
           const ct = transport.encrypt(new TextEncoder().encode(msg));
           ws.send(ct);
         } else if (transport) {
-          const plaintext = transport.decrypt(new Uint8Array(data));
+          // decrypt throws on tag-verify failure (corrupt / replayed
+          // ciphertext). Turn that into a clean promise rejection
+          // rather than letting it escape ws.onmessage as an
+          // uncaught exception.
+          let plaintext: Uint8Array;
+          try {
+            plaintext = transport.decrypt(new Uint8Array(data));
+          } catch (err: any) {
+            ws.close();
+            reject(new Error(`decrypt failed: ${err?.message ?? err}`));
+            return;
+          }
           try {
             const msg = JSON.parse(new TextDecoder().decode(plaintext));
             if (msg.type === "sessions") {

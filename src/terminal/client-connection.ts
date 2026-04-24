@@ -1,7 +1,8 @@
 import WebSocket from "ws";
 import {
-  InitiatorHandshake,
+  Handshake,
   Transport,
+  type Pattern,
 } from "../crypto/index.ts";
 
 const PING_INTERVAL_MS = 15000;
@@ -25,12 +26,21 @@ export interface ClientRelayEvents {
  * through NAT, firewalls, and proxies. If no pong is received within 5s
  * of a ping, the connection is terminated immediately.
  */
+/** Noise role configuration. NK only supplies the daemon pubkey; KK
+ *  additionally supplies the client's own static keypair. */
+export interface ClientNoise {
+  pattern: Pattern;
+  daemonPublicKey: Uint8Array;
+  /** Required for KK; must be omitted for NK. */
+  clientStaticKeys?: { publicKey: Uint8Array; privateKey: Uint8Array };
+}
+
 export class ClientRelayConnection {
   private ws: WebSocket | null = null;
   private transport: Transport | null = null;
-  private handshake: InitiatorHandshake | null = null;
+  private handshake: Handshake | null = null;
   private wsUrl: string;
-  private daemonPublicKey: Uint8Array;
+  private noise: ClientNoise;
   private events: ClientRelayEvents;
   private pingTimer: ReturnType<typeof setTimeout> | null = null;
   private pongTimer: ReturnType<typeof setTimeout> | null = null;
@@ -44,11 +54,11 @@ export class ClientRelayConnection {
 
   constructor(
     wsUrl: string,
-    daemonPublicKey: Uint8Array,
+    noise: ClientNoise,
     events: ClientRelayEvents
   ) {
     this.wsUrl = wsUrl;
-    this.daemonPublicKey = daemonPublicKey;
+    this.noise = noise;
     this.events = events;
   }
 
@@ -195,7 +205,8 @@ export class ClientRelayConnection {
   private handleBinaryMessage(data: Buffer): void {
     if (this.state === "handshaking" && this.handshake) {
       try {
-        const result = this.handshake.readWelcome(new Uint8Array(data));
+        this.handshake.readMessage(new Uint8Array(data));
+        const result = this.handshake.split();
         this.transport = new Transport(result);
         this.state = "ready";
         this.handshake = null;
@@ -223,8 +234,13 @@ export class ClientRelayConnection {
   }
 
   private startHandshake(): void {
-    this.handshake = new InitiatorHandshake(this.daemonPublicKey);
-    const hello = this.handshake.writeHello();
+    this.handshake = new Handshake({
+      pattern: this.noise.pattern,
+      initiator: true,
+      remoteStaticPublicKey: this.noise.daemonPublicKey,
+      staticKeys: this.noise.clientStaticKeys,
+    });
+    const hello = this.handshake.writeMessage();
     this.ws!.send(hello);
   }
 }

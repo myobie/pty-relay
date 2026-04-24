@@ -72,7 +72,8 @@ describe("basic connectivity via self-hosted relay", () => {
         "node",
         [
           CLI_ENTRY,
-          "serve",
+          "local",
+          "start",
           String(port),
           "--config-dir",
           path.join(ctx.stateDir, "relay"),
@@ -113,7 +114,8 @@ describe("spawn via self-hosted relay", () => {
         "node",
         [
           CLI_ENTRY,
-          "serve",
+          "local",
+          "start",
           String(port),
           "--config-dir",
           path.join(ctx.stateDir, "relay"),
@@ -157,7 +159,8 @@ describe("spawn via self-hosted relay", () => {
         "node",
         [
           CLI_ENTRY,
-          "serve",
+          "local",
+          "start",
           String(port),
           "--config-dir",
           path.join(ctx.stateDir, "relay"),
@@ -198,7 +201,8 @@ describe("spawn via self-hosted relay", () => {
         "node",
         [
           CLI_ENTRY,
-          "serve",
+          "local",
+          "start",
           String(port),
           "--config-dir",
           path.join(ctx.stateDir, "relay"),
@@ -268,7 +272,8 @@ describe("multi-client via self-hosted relay", () => {
         "node",
         [
           CLI_ENTRY,
-          "serve",
+          "local",
+          "start",
           String(port),
           "--config-dir",
           path.join(ctx.stateDir, "relay"),
@@ -343,7 +348,8 @@ describe("multi-client via self-hosted relay", () => {
         "node",
         [
           CLI_ENTRY,
-          "serve",
+          "local",
+          "start",
           String(port),
           "--config-dir",
           path.join(ctx.stateDir, "relay"),
@@ -418,7 +424,8 @@ describe("session list via self-hosted relay", () => {
         "node",
         [
           CLI_ENTRY,
-          "serve",
+          "local",
+          "start",
           String(port),
           "--config-dir",
           path.join(ctx.stateDir, "relay"),
@@ -460,7 +467,8 @@ describe("session list via self-hosted relay", () => {
         "node",
         [
           CLI_ENTRY,
-          "serve",
+          "local",
+          "start",
           String(port),
           "--config-dir",
           path.join(ctx.stateDir, "relay"),
@@ -515,7 +523,8 @@ describe("ls --json spawn_enabled field", () => {
         "node",
         [
           CLI_ENTRY,
-          "serve",
+          "local",
+          "start",
           String(port),
           "--config-dir",
           relayDir,
@@ -568,7 +577,8 @@ describe("ls --json spawn_enabled field", () => {
         "node",
         [
           CLI_ENTRY,
-          "serve",
+          "local",
+          "start",
           String(port),
           "--config-dir",
           relayDir,
@@ -625,7 +635,8 @@ describe("forget command", () => {
         "node",
         [
           CLI_ENTRY,
-          "serve",
+          "local",
+          "start",
           String(port),
           "--config-dir",
           relayDir,
@@ -770,7 +781,8 @@ describe("clean stdin after detach", () => {
         "node",
         [
           CLI_ENTRY,
-          "serve",
+          "local",
+          "start",
           String(port),
           "--config-dir",
           path.join(ctx.stateDir, "relay"),
@@ -827,7 +839,8 @@ describe("known hosts", () => {
         "node",
         [
           CLI_ENTRY,
-          "serve",
+          "local",
+          "start",
           String(port),
           "--config-dir",
           path.join(ctx.stateDir, "relay"),
@@ -882,7 +895,8 @@ describe("client approval", () => {
         "node",
         [
           CLI_ENTRY,
-          "serve",
+          "local",
+          "start",
           String(port),
           "--config-dir",
           path.join(ctx.stateDir, "relay"),
@@ -933,7 +947,8 @@ describe("client approval", () => {
         "node",
         [
           CLI_ENTRY,
-          "serve",
+          "local",
+          "start",
           String(port),
           "--config-dir",
           relayDir,
@@ -1021,7 +1036,8 @@ describe("client approval", () => {
         "node",
         [
           CLI_ENTRY,
-          "serve",
+          "local",
+          "start",
           String(port),
           "--config-dir",
           relayDir,
@@ -1099,7 +1115,8 @@ describe("client approval", () => {
         "node",
         [
           CLI_ENTRY,
-          "serve",
+          "local",
+          "start",
           String(port),
           "--config-dir",
           relayDir,
@@ -1167,7 +1184,8 @@ describe("client approval", () => {
         "node",
         [
           CLI_ENTRY,
-          "serve",
+          "local",
+          "start",
           String(port),
           "--config-dir",
           relayDir,
@@ -1343,7 +1361,8 @@ describe("credentials at rest", () => {
         "node",
         [
           CLI_ENTRY,
-          "serve",
+          "local",
+          "start",
           String(port),
           "--config-dir",
           relayDir,
@@ -1417,7 +1436,8 @@ describe("credentials at rest", () => {
         "node",
         [
           CLI_ENTRY,
-          "serve",
+          "local",
+          "start",
           String(port),
           "--config-dir",
           relayDir,
@@ -1499,7 +1519,8 @@ describe.skipIf(!keychainE2EAvailable)("credentials at rest — keychain backend
         "node",
         [
           CLI_ENTRY,
-          "serve",
+          "local",
+          "start",
           String(port),
           "--config-dir",
           relayDir,
@@ -1934,7 +1955,8 @@ describe("real user flows (no auto-approve)", () => {
         "node",
         [
           CLI_ENTRY,
-          "serve",
+          "local",
+          "start",
           String(port),
           "--config-dir",
           relayDir,
@@ -2022,7 +2044,8 @@ describe("real user flows (no auto-approve)", () => {
         "node",
         [
           CLI_ENTRY,
-          "serve",
+          "local",
+          "start",
           String(port),
           "--config-dir",
           relayDir,
@@ -2102,7 +2125,8 @@ describe("real user flows (no auto-approve)", () => {
         "node",
         [
           CLI_ENTRY,
-          "serve",
+          "local",
+          "start",
           String(port),
           "--config-dir",
           relayDir,
@@ -2202,7 +2226,8 @@ describe("real user flows (no auto-approve)", () => {
         "node",
         [
           CLI_ENTRY,
-          "serve",
+          "local",
+          "start",
           String(port),
           "--config-dir",
           relayDir,
@@ -2311,7 +2336,8 @@ describe("real user flows (no auto-approve)", () => {
         "node",
         [
           CLI_ENTRY,
-          "serve",
+          "local",
+          "start",
           String(port),
           "--config-dir",
           relayDir,
@@ -2388,7 +2414,8 @@ describe("real user flows (no auto-approve)", () => {
         "node",
         [
           CLI_ENTRY,
-          "serve",
+          "local",
+          "start",
           String(port),
           "--config-dir",
           relayDir,
@@ -2491,7 +2518,8 @@ describe("interactive TUI lifecycle", () => {
         "node",
         [
           CLI_ENTRY,
-          "serve",
+          "local",
+          "start",
           String(port),
           "--config-dir",
           path.join(ctx.stateDir, "relay"),
@@ -2549,7 +2577,8 @@ describe("interactive TUI lifecycle", () => {
         "node",
         [
           CLI_ENTRY,
-          "serve",
+          "local",
+          "start",
           String(port),
           "--config-dir",
           path.join(ctx.stateDir, "relay"),

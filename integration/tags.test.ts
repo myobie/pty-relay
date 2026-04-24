@@ -45,7 +45,8 @@ async function startRelayAndRegisterHost(
       "node",
       [
         CLI_ENTRY,
-        "serve",
+        "local",
+        "start",
         String(port),
         "--config-dir",
         relayConfigDir,

@@ -96,7 +96,8 @@ test.beforeAll(async () => {
       "node",
       [
         CLI_ENTRY,
-        "serve",
+        "local",
+        "start",
         String(PORT),
         "--config-dir",
         path.join(stateDir, "relay"),
@@ -285,7 +286,8 @@ test.describe("approval flow persists via localStorage (not URL)", () => {
       "node",
       [
         CLI_ENTRY,
-        "serve",
+        "local",
+        "start",
         String(APPROVAL_PORT),
         "--config-dir",
         approvalRelayDir,

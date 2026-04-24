@@ -73,7 +73,7 @@ class CipherState {
 function hmacBlake2b(key: Uint8Array, data: Uint8Array): Uint8Array {
   const blockSize = 128;
   const keyBlock = new Uint8Array(blockSize);
-  if (key.length > blockSize) keyBlock.set(sodium.crypto_generichash(HASH_LEN, key));
+  if (key.length > blockSize) keyBlock.set(sodium.crypto_generichash(HASH_LEN, key, null));
   else keyBlock.set(key);
   const ipad = new Uint8Array(blockSize);
   const opad = new Uint8Array(blockSize);
@@ -84,11 +84,11 @@ function hmacBlake2b(key: Uint8Array, data: Uint8Array): Uint8Array {
   const inner = new Uint8Array(blockSize + data.length);
   inner.set(ipad);
   inner.set(data, blockSize);
-  const innerHash = sodium.crypto_generichash(HASH_LEN, inner);
+  const innerHash = sodium.crypto_generichash(HASH_LEN, inner, null);
   const outer = new Uint8Array(blockSize + HASH_LEN);
   outer.set(opad);
   outer.set(innerHash, blockSize);
-  return sodium.crypto_generichash(HASH_LEN, outer);
+  return sodium.crypto_generichash(HASH_LEN, outer, null);
 }
 
 function hkdf(ck: Uint8Array, ikm: Uint8Array): [Uint8Array, Uint8Array] {
@@ -117,7 +117,7 @@ class SymmetricState {
     const c = new Uint8Array(this.h.length + data.length);
     c.set(this.h);
     c.set(data, this.h.length);
-    this.h = sodium.crypto_generichash(HASH_LEN, c);
+    this.h = sodium.crypto_generichash(HASH_LEN, c, null);
   }
   mixKey(ikm: Uint8Array): void {
     const oldCk = this.ck;
@@ -127,6 +127,28 @@ class SymmetricState {
     sodium.memzero(oldCk);
     sodium.memzero(tempK);
     sodium.memzero(ikm);
+  }
+  // encryptAndHash / decryptAndHash wrap the current CipherState so the
+  // empty-payload AEAD tag at the end of each handshake message is
+  // transmitted and verified. Required for wire compatibility with the
+  // spec-compliant TS engine in src/crypto/noise.ts.
+  encryptAndHash(plaintext: Uint8Array): Uint8Array {
+    if (!this.cipher.hasKey()) {
+      this.mixHash(plaintext);
+      return plaintext;
+    }
+    const ciphertext = this.cipher.encryptWithAd(this.h, plaintext);
+    this.mixHash(ciphertext);
+    return ciphertext;
+  }
+  decryptAndHash(ciphertext: Uint8Array): Uint8Array {
+    if (!this.cipher.hasKey()) {
+      this.mixHash(ciphertext);
+      return ciphertext;
+    }
+    const plaintext = this.cipher.decryptWithAd(this.h, ciphertext);
+    this.mixHash(ciphertext);
+    return plaintext;
   }
   split(): [CipherState, CipherState] {
     const [k1, k2] = hkdf(this.ck, new Uint8Array(0));
@@ -152,19 +174,45 @@ interface Handshake {
   readWelcome(welcomeMsg: Uint8Array): Transport;
 }
 
+// Noise NK initiator, wire-compatible with src/crypto/noise.ts's
+// `Handshake({pattern: NK, initiator: true, ...})`. Each handshake
+// message ends with encryptAndHash(empty) — a 16-byte AEAD tag — per
+// Noise spec § 5.3. Both the hello we send and the welcome we parse
+// carry (ephemeral + 16-byte tag).
+const AEAD_TAG_LEN = 16;
+
 function initiatorHandshake(responderPubKey: Uint8Array): Handshake {
   const ss = new SymmetricState();
+  // Pre-message: responder's static is pre-known, mixed into the hash
+  // before any wire bytes.
   ss.mixHash(responderPubKey);
+
+  // -> e, es
   const { publicKey: ePub, privateKey: ePriv } = sodium.crypto_box_keypair();
   ss.mixHash(ePub);
   const dh1 = sodium.crypto_scalarmult(ePriv, responderPubKey);
   ss.mixKey(dh1);
-  const hello = new Uint8Array(ePub);
+  // encryptAndHash on an empty payload after mixKey produces just the
+  // AEAD tag. Append it to the ephemeral pubkey to form the full hello.
+  const helloTag = ss.encryptAndHash(new Uint8Array(0));
+  const hello = concatBytes([ePub, helloTag]);
+
   function readWelcome(welcomeMsg: Uint8Array): Transport {
-    if (welcomeMsg.length !== DH_LEN) throw new Error("Bad WELCOME size");
-    ss.mixHash(welcomeMsg);
-    const dh2 = sodium.crypto_scalarmult(ePriv, welcomeMsg);
+    // <- e, ee — welcome is (remote ephemeral + AEAD tag).
+    if (welcomeMsg.length !== DH_LEN + AEAD_TAG_LEN) {
+      throw new Error(
+        `Bad WELCOME size: expected ${DH_LEN + AEAD_TAG_LEN}, got ${welcomeMsg.length}`
+      );
+    }
+    const re = welcomeMsg.subarray(0, DH_LEN);
+    const tag = welcomeMsg.subarray(DH_LEN);
+    ss.mixHash(re);
+    const dh2 = sodium.crypto_scalarmult(ePriv, re);
     ss.mixKey(dh2);
+    // decryptAndHash verifies the AEAD tag against the current hash.
+    // Its return is an empty plaintext; we only care about the side
+    // effect of proving the responder saw the same transcript.
+    ss.decryptAndHash(new Uint8Array(tag));
     sodium.memzero(ePriv);
     const [c1, c2] = ss.split();
     return {
@@ -173,6 +221,18 @@ function initiatorHandshake(responderPubKey: Uint8Array): Handshake {
     };
   }
   return { hello, readWelcome };
+}
+
+function concatBytes(chunks: Uint8Array[]): Uint8Array {
+  let total = 0;
+  for (const c of chunks) total += c.length;
+  const out = new Uint8Array(total);
+  let off = 0;
+  for (const c of chunks) {
+    out.set(c, off);
+    off += c.length;
+  }
+  return out;
 }
 
 // ── PTY packet framing ──

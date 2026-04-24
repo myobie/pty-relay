@@ -60,6 +60,6 @@ export async function initCommand(opts: InitOpts): Promise<void> {
   console.log(`Backend: ${store.backend}`);
   console.log("");
   console.log("Next steps:");
-  console.log("  pty-relay serve        # start the relay");
+  console.log("  pty-relay local start  # start the self-hosted relay");
   console.log("  pty-relay connect URL  # connect to a remote daemon");
 }

@@ -60,7 +60,7 @@ var CipherState = class {
 function hmacBlake2b(key, data) {
   const blockSize = 128;
   const keyBlock = new Uint8Array(blockSize);
-  if (key.length > blockSize) keyBlock.set(sodium.crypto_generichash(HASH_LEN, key));
+  if (key.length > blockSize) keyBlock.set(sodium.crypto_generichash(HASH_LEN, key, null));
   else keyBlock.set(key);
   const ipad = new Uint8Array(blockSize);
   const opad = new Uint8Array(blockSize);
@@ -71,11 +71,11 @@ function hmacBlake2b(key, data) {
   const inner = new Uint8Array(blockSize + data.length);
   inner.set(ipad);
   inner.set(data, blockSize);
-  const innerHash = sodium.crypto_generichash(HASH_LEN, inner);
+  const innerHash = sodium.crypto_generichash(HASH_LEN, inner, null);
   const outer = new Uint8Array(blockSize + HASH_LEN);
   outer.set(opad);
   outer.set(innerHash, blockSize);
-  return sodium.crypto_generichash(HASH_LEN, outer);
+  return sodium.crypto_generichash(HASH_LEN, outer, null);
 }
 function hkdf(ck, ikm) {
   const tempKey = hmacBlake2b(ck, ikm);
@@ -102,7 +102,7 @@ var SymmetricState = class {
     const c = new Uint8Array(this.h.length + data.length);
     c.set(this.h);
     c.set(data, this.h.length);
-    this.h = sodium.crypto_generichash(HASH_LEN, c);
+    this.h = sodium.crypto_generichash(HASH_LEN, c, null);
   }
   mixKey(ikm) {
     const oldCk = this.ck;
@@ -112,6 +112,28 @@ var SymmetricState = class {
     sodium.memzero(oldCk);
     sodium.memzero(tempK);
     sodium.memzero(ikm);
+  }
+  // encryptAndHash / decryptAndHash wrap the current CipherState so the
+  // empty-payload AEAD tag at the end of each handshake message is
+  // transmitted and verified. Required for wire compatibility with the
+  // spec-compliant TS engine in src/crypto/noise.ts.
+  encryptAndHash(plaintext) {
+    if (!this.cipher.hasKey()) {
+      this.mixHash(plaintext);
+      return plaintext;
+    }
+    const ciphertext = this.cipher.encryptWithAd(this.h, plaintext);
+    this.mixHash(ciphertext);
+    return ciphertext;
+  }
+  decryptAndHash(ciphertext) {
+    if (!this.cipher.hasKey()) {
+      this.mixHash(ciphertext);
+      return ciphertext;
+    }
+    const plaintext = this.cipher.decryptWithAd(this.h, ciphertext);
+    this.mixHash(ciphertext);
+    return plaintext;
   }
   split() {
     const [k1, k2] = hkdf(this.ck, new Uint8Array(0));
@@ -126,6 +148,7 @@ var SymmetricState = class {
     return result;
   }
 };
+var AEAD_TAG_LEN = 16;
 function initiatorHandshake(responderPubKey) {
   const ss = new SymmetricState();
   ss.mixHash(responderPubKey);
@@ -133,12 +156,20 @@ function initiatorHandshake(responderPubKey) {
   ss.mixHash(ePub);
   const dh1 = sodium.crypto_scalarmult(ePriv, responderPubKey);
   ss.mixKey(dh1);
-  const hello = new Uint8Array(ePub);
+  const helloTag = ss.encryptAndHash(new Uint8Array(0));
+  const hello = concatBytes([ePub, helloTag]);
   function readWelcome(welcomeMsg) {
-    if (welcomeMsg.length !== DH_LEN) throw new Error("Bad WELCOME size");
-    ss.mixHash(welcomeMsg);
-    const dh2 = sodium.crypto_scalarmult(ePriv, welcomeMsg);
+    if (welcomeMsg.length !== DH_LEN + AEAD_TAG_LEN) {
+      throw new Error(
+        `Bad WELCOME size: expected ${DH_LEN + AEAD_TAG_LEN}, got ${welcomeMsg.length}`
+      );
+    }
+    const re = welcomeMsg.subarray(0, DH_LEN);
+    const tag = welcomeMsg.subarray(DH_LEN);
+    ss.mixHash(re);
+    const dh2 = sodium.crypto_scalarmult(ePriv, re);
     ss.mixKey(dh2);
+    ss.decryptAndHash(new Uint8Array(tag));
     sodium.memzero(ePriv);
     const [c1, c2] = ss.split();
     return {
@@ -147,6 +178,17 @@ function initiatorHandshake(responderPubKey) {
     };
   }
   return { hello, readWelcome };
+}
+function concatBytes(chunks) {
+  let total = 0;
+  for (const c of chunks) total += c.length;
+  const out = new Uint8Array(total);
+  let off = 0;
+  for (const c of chunks) {
+    out.set(c, off);
+    off += c.length;
+  }
+  return out;
 }
 function makePacket(type, payload) {
   const p = payload instanceof Uint8Array ? payload : new Uint8Array(payload);

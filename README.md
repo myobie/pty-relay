@@ -24,7 +24,7 @@ terminal data is end-to-end encrypted — the relay never sees plaintext.
 Start a relay on your machine:
 
 ```bash
-pty-relay serve --tailscale --auto-approve --allow-new-sessions
+pty-relay local start --tailscale --auto-approve --allow-new-sessions
 ```
 
 That's it. Open the printed Tailscale URL from any device on your
@@ -33,7 +33,7 @@ tailnet. You can also scan the QR code from your phone.
 For maximum security, omit the flags:
 
 ```bash
-pty-relay serve
+pty-relay local start
 ```
 
 Without flags: each client must be approved, and remote session creation
@@ -43,7 +43,7 @@ with `pty run`).
 ### Running in the background
 
 ```bash
-pty-relay serve -d --tailscale --auto-approve --allow-new-sessions
+pty-relay local start -d --tailscale --auto-approve --allow-new-sessions
 ```
 
 This wraps the relay in a detached [pty](https://github.com/myobie/pty)
@@ -137,7 +137,7 @@ Prints an invite URL that auto-approves on first use.
 **Skip approval (convenience):**
 
 ```bash
-pty-relay serve --auto-approve
+pty-relay local start --auto-approve
 ```
 
 ### How approval works
@@ -152,7 +152,7 @@ pty-relay serve --auto-approve
 ## Commands
 
 ```
-pty-relay serve [port]        Run self-hosted relay (default: 8099)
+pty-relay local start [port]  Run self-hosted relay (default: 8099)
 pty-relay connect <url>       Connect to a session (or pick from list)
 pty-relay ls                  List known hosts and their sessions
 pty-relay forget <host>       Remove a saved host
@@ -195,8 +195,8 @@ fallback.
 ### Non-interactive use
 
 ```bash
-PTY_RELAY_PASSPHRASE=... pty-relay serve
-pty-relay serve --passphrase-file /path/to/passphrase
+PTY_RELAY_PASSPHRASE=... pty-relay local start
+pty-relay local start --passphrase-file /path/to/passphrase
 ```
 
 ### Forgot your passphrase?

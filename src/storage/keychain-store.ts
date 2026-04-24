@@ -209,7 +209,13 @@ export class KeychainStore implements SecretStore {
    * `pty-relay reset`.
    */
   async destroyAll(): Promise<void> {
-    const names: SecretName[] = ["config", "clients", "hosts", "auth"];
+    const names: SecretName[] = [
+      "config",
+      "clients",
+      "hosts",
+      "auth",
+      "public_account",
+    ];
     for (const n of names) {
       await this.delete(n);
     }

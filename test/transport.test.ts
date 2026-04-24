@@ -2,8 +2,8 @@ import { describe, it, expect, beforeAll } from "vitest";
 import {
   ready,
   generateKeypair,
-  InitiatorHandshake,
-  ResponderHandshake,
+  Handshake,
+  NK,
   Transport,
 } from "../src/crypto/index.ts";
 
@@ -14,22 +14,25 @@ beforeAll(async () => {
 function setupTransports(): { client: Transport; daemon: Transport } {
   const daemonKeys = generateKeypair();
 
-  const initiator = new InitiatorHandshake(daemonKeys.publicKey);
-  const hello = initiator.writeHello();
+  const initiator = new Handshake({
+    pattern: NK,
+    initiator: true,
+    remoteStaticPublicKey: daemonKeys.publicKey,
+  });
+  const responder = new Handshake({
+    pattern: NK,
+    initiator: false,
+    staticKeys: { publicKey: daemonKeys.publicKey, privateKey: daemonKeys.secretKey },
+  });
 
-  const responder = new ResponderHandshake(
-    daemonKeys.publicKey,
-    daemonKeys.secretKey
-  );
-  responder.readHello(hello);
-  const { message: welcome, result: daemonResult } =
-    responder.writeWelcome();
-
-  const clientResult = initiator.readWelcome(welcome);
+  const hello = initiator.writeMessage();
+  responder.readMessage(hello);
+  const welcome = responder.writeMessage();
+  initiator.readMessage(welcome);
 
   return {
-    client: new Transport(clientResult),
-    daemon: new Transport(daemonResult),
+    client: new Transport(initiator.split()),
+    daemon: new Transport(responder.split()),
   };
 }
 

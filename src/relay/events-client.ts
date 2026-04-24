@@ -1,13 +1,21 @@
+import sodium from "libsodium-wrappers-sumo";
 import {
   ready,
   parseToken,
   computeSecretHash,
   getWebSocketUrl,
-  InitiatorHandshake,
+  Handshake,
+  NK,
+  KK,
   Transport,
 } from "../crypto/index.ts";
+import {
+  ed25519PkToCurve25519,
+  ed25519SkToCurve25519,
+} from "../crypto/key-conversion.ts";
+import { buildPublicClientPairUrl } from "./public-server-url.ts";
 import type { EventRecord } from "@myobie/pty/client";
-import type { RemoteSession } from "./relay-client.ts";
+import type { PublicTarget, RemoteSession } from "./relay-client.ts";
 import WebSocket from "ws";
 
 export interface SubscribeRemoteEventsOptions {
@@ -120,7 +128,7 @@ export function subscribeRemoteEvents(
     ws = sock;
     sock.binaryType = "nodebuffer";
 
-    let initiator: InstanceType<typeof InitiatorHandshake> | null = null;
+    let handshake: Handshake | null = null;
     let transport: Transport | null = null;
 
     const fatalError = (msg: string): void => {
@@ -140,8 +148,12 @@ export function subscribeRemoteEvents(
           return;
         }
         if (msg.type === "paired") {
-          initiator = new InitiatorHandshake(parsed.publicKey);
-          sock.send(initiator.writeHello());
+          handshake = new Handshake({
+            pattern: NK,
+            initiator: true,
+            remoteStaticPublicKey: parsed.publicKey,
+          });
+          sock.send(handshake.writeMessage());
         } else if (msg.type === "waiting_for_approval") {
           // The relay is holding us in the approval queue. There's no graceful
           // way for a long-lived subscription to wait here — treat it as a
@@ -157,11 +169,11 @@ export function subscribeRemoteEvents(
         ? event.data
         : Buffer.from(event.data as ArrayBuffer);
 
-      if (!transport && initiator) {
+      if (!transport && handshake) {
         // First binary: welcome. Finish the handshake, send events_subscribe.
-        const result = initiator.readWelcome(new Uint8Array(data));
-        transport = new Transport(result);
-        initiator = null;
+        handshake.readMessage(new Uint8Array(data));
+        transport = new Transport(handshake.split());
+        handshake = null;
         attempts = 0; // successful handshake resets backoff
         const request = JSON.stringify({ type: "events_subscribe" });
         sock.send(transport.encrypt(new TextEncoder().encode(request)));
@@ -169,7 +181,16 @@ export function subscribeRemoteEvents(
       }
 
       if (!transport) return;
-      const plaintext = transport.decrypt(new Uint8Array(data));
+      let plaintext: Uint8Array;
+      try {
+        plaintext = transport.decrypt(new Uint8Array(data));
+      } catch (err: any) {
+        // AEAD failure on the long-lived events stream: the tunnel is
+        // compromised/desynced. Close and let the reconnect loop take
+        // over rather than throw out of ws.onmessage.
+        fatalError(`decrypt failed: ${err?.message ?? err}`);
+        return;
+      }
       let inner: { type: string; [k: string]: unknown };
       try {
         inner = JSON.parse(new TextDecoder().decode(plaintext));
@@ -209,6 +230,190 @@ export function subscribeRemoteEvents(
   }
 
   // Initial connect (async, but we return the handle synchronously).
+  connectOnce().catch((err) => {
+    options.onError?.(err);
+    scheduleReconnect();
+  });
+
+  return {
+    close(): void {
+      closed = true;
+      clearReconnectTimer();
+      clearIdleTimer();
+      try { ws?.close(); } catch {}
+      ws = null;
+    },
+  };
+}
+
+/**
+ * Public-relay twin of `subscribeRemoteEvents`: same semantics, but the
+ * transport is `role=client_pair` + Ed25519-signed query params instead
+ * of self-hosted `role=client` + secret_hash.
+ *
+ * Target's Noise responder static is derived from its Ed25519 pubkey
+ * (matching what the minter uses). A fresh URL is built on every
+ * (re)connect because Ed25519 payloads expire after 60 seconds.
+ */
+export function subscribePublicRemoteEvents(
+  target: PublicTarget,
+  options: SubscribeRemoteEventsOptions
+): RemoteEventsSubscription {
+  let closed = false;
+  let ws: WebSocket | null = null;
+  let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  let idleTimer: ReturnType<typeof setTimeout> | null = null;
+  let attempts = 0;
+
+  const clearReconnectTimer = () => {
+    if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
+  };
+  const clearIdleTimer = () => {
+    if (idleTimer) { clearTimeout(idleTimer); idleTimer = null; }
+  };
+  const resetIdleTimer = () => {
+    clearIdleTimer();
+    if (closed) return;
+    idleTimer = setTimeout(() => {
+      try { ws?.close(); } catch {}
+    }, IDLE_TIMEOUT_MS);
+  };
+
+  const scheduleReconnect = () => {
+    if (closed) return;
+    if (attempts >= MAX_RECONNECT_ATTEMPTS) {
+      options.onGaveUp?.();
+      closed = true;
+      return;
+    }
+    attempts++;
+    options.onReconnecting?.(attempts);
+    const delay = Math.min(
+      INITIAL_BACKOFF_MS * Math.pow(BACKOFF_MULTIPLIER, attempts - 1),
+      MAX_BACKOFF_MS
+    );
+    reconnectTimer = setTimeout(() => {
+      reconnectTimer = null;
+      connectOnce().catch((err) => {
+        options.onError?.(err);
+        scheduleReconnect();
+      });
+    }, delay);
+  };
+
+  async function connectOnce(): Promise<void> {
+    await ready();
+    if (closed) return;
+
+    const wsUrl = buildPublicClientPairUrl(
+      target.relayUrl,
+      target.accountKeys,
+      target.targetPublicKeyB64
+    );
+    const targetEdBytes = sodium.from_base64(
+      target.targetPublicKeyB64,
+      sodium.base64_variants.URLSAFE_NO_PADDING
+    );
+    const targetCurvePk = await ed25519PkToCurve25519(targetEdBytes);
+    const clientStaticKeys = {
+      publicKey: await ed25519PkToCurve25519(target.accountKeys.public),
+      privateKey: await ed25519SkToCurve25519(target.accountKeys.secret),
+    };
+
+    const sock = new WebSocket(wsUrl);
+    ws = sock;
+    sock.binaryType = "nodebuffer";
+
+    let handshake: Handshake | null = null;
+    let transport: Transport | null = null;
+
+    const fatalError = (msg: string): void => {
+      options.onError?.(new Error(msg));
+      try { sock.close(); } catch {}
+    };
+
+    sock.onopen = () => { /* wait for "paired" text frame */ };
+
+    sock.onmessage = (event) => {
+      resetIdleTimer();
+      if (typeof event.data === "string") {
+        let msg: { type: string; [k: string]: unknown };
+        try {
+          msg = JSON.parse(event.data);
+        } catch {
+          return;
+        }
+        if (msg.type === "paired") {
+          handshake = new Handshake({
+            pattern: KK,
+            initiator: true,
+            remoteStaticPublicKey: targetCurvePk,
+            staticKeys: clientStaticKeys,
+          });
+          sock.send(handshake.writeMessage());
+        } else if (msg.type === "error") {
+          fatalError(String(msg.message ?? "relay error"));
+        }
+        // Public-mode never emits waiting_for_approval.
+        return;
+      }
+
+      const data = Buffer.isBuffer(event.data)
+        ? event.data
+        : Buffer.from(event.data as ArrayBuffer);
+
+      if (!transport && handshake) {
+        handshake.readMessage(new Uint8Array(data));
+        transport = new Transport(handshake.split());
+        handshake = null;
+        attempts = 0;
+        const request = JSON.stringify({ type: "events_subscribe" });
+        sock.send(transport.encrypt(new TextEncoder().encode(request)));
+        return;
+      }
+
+      if (!transport) return;
+      let plaintext: Uint8Array;
+      try {
+        plaintext = transport.decrypt(new Uint8Array(data));
+      } catch (err: any) {
+        fatalError(`decrypt failed: ${err?.message ?? err}`);
+        return;
+      }
+      let inner: { type: string; [k: string]: unknown };
+      try {
+        inner = JSON.parse(new TextDecoder().decode(plaintext));
+      } catch {
+        return;
+      }
+      switch (inner.type) {
+        case "events_snapshot":
+          options.onSnapshot((inner.sessions as RemoteSession[]) ?? []);
+          return;
+        case "event":
+          if (inner.event) options.onEvent(inner.event as EventRecord);
+          return;
+        case "event_ping":
+          return;
+        case "error":
+          fatalError(String(inner.message ?? "remote error"));
+          return;
+      }
+    };
+
+    sock.onerror = (evt) => {
+      const message = (evt as { message?: string }).message ?? "websocket error";
+      options.onError?.(new Error(message));
+    };
+
+    sock.onclose = () => {
+      clearIdleTimer();
+      ws = null;
+      if (closed) return;
+      scheduleReconnect();
+    };
+  }
+
   connectOnce().catch((err) => {
     options.onError?.(err);
     scheduleReconnect();

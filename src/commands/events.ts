@@ -1,7 +1,12 @@
 import type { EventRecord } from "@myobie/pty/client";
 import { ready } from "../crypto/index.ts";
-import { loadKnownHosts } from "../relay/known-hosts.ts";
-import { subscribeRemoteEvents } from "../relay/events-client.ts";
+import {
+  subscribeRemoteEvents,
+  subscribePublicRemoteEvents,
+  type SubscribeRemoteEventsOptions,
+  type RemoteEventsSubscription,
+} from "../relay/events-client.ts";
+import { resolveHost } from "../relay/host-resolve.ts";
 import { openSecretStore } from "../storage/bootstrap.ts";
 
 // NOTE: `--recent` (one-shot historical events for a session) is deliberately
@@ -17,32 +22,30 @@ interface EventsOpts {
   passphraseFile?: string;
 }
 
-async function resolveHostUrl(
-  hostLabel: string,
-  opts: Pick<EventsOpts, "configDir" | "passphraseFile">
-): Promise<string> {
-  await ready();
-  const { store } = await openSecretStore(opts.configDir, {
-    interactive: true,
-    passphraseFile: opts.passphraseFile,
-  });
-  const hosts = await loadKnownHosts(store);
-  const host = hosts.find((h) => h.label === hostLabel);
-  if (!host) {
-    console.error(`No known host with label "${hostLabel}".`);
-    console.error("Run 'pty-relay ls' to see host labels.");
-    process.exit(1);
-  }
-  return host.url;
-}
-
 /**
  * Follow events from a remote daemon. Runs until the process is interrupted.
  * With `json`, each event becomes a single JSONL line on stdout for scripting.
  * Without, events are printed in a human-readable one-line form.
+ *
+ * Works over both self-hosted (`#pk.secret` token) and public-relay
+ * (`{relayUrl, publicKey}`) hosts — resolveHost picks the transport.
  */
 export async function follow(hostLabel: string, opts: EventsOpts): Promise<void> {
-  const url = await resolveHostUrl(hostLabel, opts);
+  await ready();
+
+  const { store } = await openSecretStore(opts.configDir, {
+    interactive: true,
+    passphraseFile: opts.passphraseFile,
+  });
+
+  let resolved;
+  try {
+    resolved = await resolveHost(hostLabel, store);
+  } catch (err: any) {
+    console.error(err?.message ?? err);
+    process.exit(1);
+  }
+
   const sessionFilter = opts.session;
 
   const printHuman = (evt: EventRecord): void => {
@@ -59,7 +62,7 @@ export async function follow(hostLabel: string, opts: EventsOpts): Promise<void>
     process.stdout.write(extra.length > 0 ? `${base}  ${extra.join(" ")}\n` : `${base}\n`);
   };
 
-  const subscription = subscribeRemoteEvents(url, {
+  const subOpts: SubscribeRemoteEventsOptions = {
     onSnapshot: () => {
       // Streaming mode doesn't re-print the snapshot; a JSON consumer that
       // wants the current list should call `pty-relay ls --json`. But do
@@ -83,7 +86,12 @@ export async function follow(hostLabel: string, opts: EventsOpts): Promise<void>
       process.stderr.write(`[events] gave up reconnecting\n`);
       process.exit(1);
     },
-  });
+  };
+
+  const subscription: RemoteEventsSubscription =
+    resolved.kind === "public"
+      ? subscribePublicRemoteEvents(resolved.target, subOpts)
+      : subscribeRemoteEvents(resolved.url, subOpts);
 
   // Keep the process alive until Ctrl+C.
   process.on("SIGINT", () => {
@@ -94,4 +102,3 @@ export async function follow(hostLabel: string, opts: EventsOpts): Promise<void>
   // otherwise exit once all sync code is done.
   await new Promise<void>(() => {});
 }
-

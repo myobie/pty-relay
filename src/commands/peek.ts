@@ -1,6 +1,9 @@
 import { ready } from "../crypto/index.ts";
-import { loadKnownHosts } from "../relay/known-hosts.ts";
-import { peekRemoteSession } from "../relay/relay-client.ts";
+import {
+  peekRemoteSession,
+  peekPublicRemoteSession,
+} from "../relay/relay-client.ts";
+import { resolveHost } from "../relay/host-resolve.ts";
 import { openSecretStore } from "../storage/bootstrap.ts";
 
 export async function peek(
@@ -21,21 +24,25 @@ export async function peek(
     interactive: true,
     passphraseFile: opts.passphraseFile,
   });
-  const hosts = await loadKnownHosts(store);
-  const host = hosts.find((h) => h.label === hostLabel);
-  if (!host) {
-    console.error(`No known host with label "${hostLabel}".`);
-    console.error("Run 'pty-relay ls' to see host labels.");
+  let resolved;
+  try {
+    resolved = await resolveHost(hostLabel, store);
+  } catch (err: any) {
+    console.error(err?.message ?? err);
     process.exit(1);
   }
 
   try {
-    const result = await peekRemoteSession(host.url, session, {
+    const peekOpts = {
       plain: !!opts.plain,
       full: !!opts.full,
       wait: opts.wait,
       timeoutSec: opts.timeoutSec,
-    });
+    };
+    const result =
+      resolved.kind === "public"
+        ? await peekPublicRemoteSession(resolved.target, session, peekOpts)
+        : await peekRemoteSession(resolved.url, session, peekOpts);
     // Write the screen to stdout as-is; callers can pipe or redirect.
     process.stdout.write(result.screen);
     // Add a trailing newline only if the screen didn't end with one, so

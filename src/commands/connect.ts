@@ -6,6 +6,7 @@ import {
   computeSecretHash,
   getWebSocketUrl,
   createToken,
+  NK,
 } from "../crypto/index.ts";
 import type { ParsedToken } from "../crypto/index.ts";
 import { ClientRelayConnection } from "../terminal/client-connection.ts";
@@ -21,17 +22,47 @@ const RECONNECT_BACKOFF = 2;
 const MAX_RECONNECT_ATTEMPTS = 20;
 
 export async function connect(
-  tokenUrl: string,
+  tokenUrlOrLabel: string,
   options?: {
     spawn?: string;
     cwd?: string;
     tags?: Record<string, string>;
+    session?: string;
     configDir?: string;
     passphraseFile?: string;
   }
 ): Promise<void> {
   await ready();
 
+  // Dispatch: a raw http(s):// URL is a self-hosted token URL and goes
+  // through the existing flow. Anything else is treated as a known-hosts
+  // label — we look it up and, if public-mode, hand off to the public
+  // attach path. Labels are a recent addition for public-relay; the
+  // self-hosted UX still keys on paste-in token URLs.
+  if (!looksLikeTokenUrl(tokenUrlOrLabel)) {
+    const { store, passphrase } = await openSecretStore(options?.configDir, {
+      interactive: true,
+      passphraseFile: options?.passphraseFile,
+    });
+    if (passphrase && !process.env.PTY_RELAY_PASSPHRASE) {
+      process.env.PTY_RELAY_PASSPHRASE = passphrase;
+    }
+    const { resolveHost } = await import("../relay/host-resolve.ts");
+    const resolved = await resolveHost(tokenUrlOrLabel, store);
+    if (resolved.kind === "public") {
+      const { connectPublic } = await import("./connect-public.ts");
+      await connectPublic(tokenUrlOrLabel, {
+        session: options?.session,
+        configDir: options?.configDir,
+        passphraseFile: options?.passphraseFile,
+      });
+      return;
+    }
+    // Self-hosted label → look up the stored URL and fall through.
+    tokenUrlOrLabel = resolved.url;
+  }
+
+  const tokenUrl = tokenUrlOrLabel;
   const parsed = parseToken(tokenUrl);
   const secretHash = computeSecretHash(parsed.secret);
   const wsUrl = getWebSocketUrl(parsed.host, "client", secretHash, undefined, parsed.clientToken ?? undefined);
@@ -58,6 +89,10 @@ export async function connect(
   }
 
   attachSession(wsUrl, parsed, store, options);
+}
+
+function looksLikeTokenUrl(s: string): boolean {
+  return s.startsWith("http://") || s.startsWith("https://");
 }
 
 /**
@@ -120,7 +155,10 @@ function fetchSessions(
       reject(new Error("Timed out waiting for session list"));
     }, 15000);
 
-    const connection = new ClientRelayConnection(wsUrl, parsed.publicKey, {
+    const connection = new ClientRelayConnection(wsUrl, {
+      pattern: NK,
+      daemonPublicKey: parsed.publicKey,
+    }, {
       onReady: () => {
         if (!process.env.PTY_RELAY_CLIENT_ANON) {
           connection.send(new TextEncoder().encode(JSON.stringify({
@@ -229,7 +267,10 @@ function attemptConnect(
       resolve(reason);
     }
 
-    const connection = new ClientRelayConnection(wsUrl, parsed.publicKey, {
+    const connection = new ClientRelayConnection(wsUrl, {
+      pattern: NK,
+      daemonPublicKey: parsed.publicKey,
+    }, {
       onReady: () => {
         if (!process.env.PTY_RELAY_CLIENT_ANON) {
           connection.send(new TextEncoder().encode(JSON.stringify({

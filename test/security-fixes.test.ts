@@ -8,7 +8,7 @@ import {
   type ClientsData,
 } from "../src/relay/clients.ts";
 import type { SecretStore } from "../src/storage/secret-store.ts";
-import { InitiatorHandshake, ResponderHandshake } from "../src/crypto/noise.ts";
+import { Handshake, NK } from "../src/crypto/noise.ts";
 import { ready as sodiumReady } from "../src/crypto/index.ts";
 import sodium from "libsodium-wrappers-sumo";
 
@@ -198,36 +198,40 @@ describe("updateClients serialization", () => {
   });
 });
 
-describe("Noise readHello/readWelcome defensive-copy", () => {
+describe("Noise readMessage defensive-copy", () => {
   it("is not affected by the caller zeroing its input buffer after the call", async () => {
     await sodiumReady();
 
-    // Responder static keypair (libsodium's box_keypair gives us an x25519 pair)
     const s = sodium.crypto_box_keypair();
     const responderStaticPub = new Uint8Array(s.publicKey);
     const responderStaticPriv = new Uint8Array(s.privateKey);
 
-    // Initiator drives the handshake with an ephemeral key.
-    const initiator = new InitiatorHandshake(responderStaticPub);
-    const hello = initiator.writeHello();
+    const initiator = new Handshake({
+      pattern: NK,
+      initiator: true,
+      remoteStaticPublicKey: responderStaticPub,
+    });
+    const responder = new Handshake({
+      pattern: NK,
+      initiator: false,
+      staticKeys: { publicKey: responderStaticPub, privateKey: responderStaticPriv },
+    });
 
-    // The responder receives hello, then the caller reuses (zeroes) its
-    // buffer — which used to alias the handshake transcript. After the fix,
-    // readHello makes a defensive copy, so mixHash's state is still correct
-    // when we compute the welcome.
-    const responder = new ResponderHandshake(responderStaticPub, responderStaticPriv);
-    responder.readHello(hello);
-    hello.fill(0); // caller zeros the buffer
+    const hello = initiator.writeMessage();
 
-    const { message: welcome, result: respKeys } = responder.writeWelcome();
+    // Caller zeros its input buffer after handing it off. If the handshake
+    // aliased the caller's buffer, mixHash's transcript would be corrupted
+    // and the final transport keys would diverge.
+    responder.readMessage(hello);
+    hello.fill(0);
 
-    // Initiator symmetrically: reads welcome, then caller zeros the input.
-    const initKeys = initiator.readWelcome(welcome);
+    const welcome = responder.writeMessage();
+    initiator.readMessage(welcome);
     welcome.fill(0);
 
-    // If the defensive copy worked, the two sides derived matching transport
-    // keys (sender/receiver swapped). Confirm by round-tripping an AEAD
-    // message end-to-end through the counter-based CipherStates.
+    const initKeys = initiator.split();
+    const respKeys = responder.split();
+
     const ad = new Uint8Array();
     const plaintext = new TextEncoder().encode("hi");
     const ciphertext = initKeys.send.encryptWithAd(ad, plaintext);

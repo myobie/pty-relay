@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 
+import { hostname } from "node:os";
 import { extractTagFlags } from "./args.ts";
 
 const args = process.argv.slice(2);
@@ -36,17 +37,23 @@ Commands:
   events <host>                                Follow events from a remote daemon (Ctrl+C to stop)
   events --session <name> <host>               Filter to a single session
   events --json <host>                         Emit JSONL for scripting
+  rename <old> <new>        Rename a saved known-host entry
   forget <host-label>       Remove a saved host
   connect [token-url]       Connect to a remote pty session (or list sessions)
   connect --spawn <n> --tag k=v  Spawn a session with tags (--tag repeatable)
-  serve [port]              Run a self-hosted relay (default: 8099)
+  local start [port]        Run a self-hosted relay (default: 8099)
+  local --help              Show self-hosted subcommands
   set-name <label>          Set a custom name for this daemon
   clients                   Interactive client approval TUI
   clients list              List client tokens (use --json for JSON)
   clients approve <id>      Approve a pending client
-  clients revoke <id>       Revoke a client token
+  clients revoke <id> [-y]  Revoke a client token (prompts for y/N)
   clients invite [--label]  Generate a pre-approved invite URL
   doctor                    Print environment info for troubleshooting
+  server                    Public-relay account management (signin, mint, etc.)
+  server --help             Show public-relay subcommands
+  client signin --email <addr>  Register this device as an account-wide client
+  client --help             Show client subcommands
   version                   Print the pty-relay version
 
 Options:
@@ -58,7 +65,7 @@ Options:
                                    (for non-interactive startup, e.g. a pty session)
   --auto-approve            Skip client approval (allow all connections)
   --tailscale               Enable Tailscale HTTPS via 'tailscale serve'
-  -d, --detach              Run serve in a detached pty session
+  -d, --detach              Run 'local start' in a detached pty session
   --name <label>            Name for the wrapped pty session (default: relay-daemon)
   --json                    Output as JSON (for ls)
   --spawn <name>            Spawn a new remote session (for connect)
@@ -98,7 +105,15 @@ async function main(): Promise<void> {
   // the slot right after the command so quoted text that happens to contain
   // "--help" deeper in the argv (e.g. `pty-relay send h s "see --help"`)
   // isn't swallowed.
-  if (command && (args[1] === "--help" || args[1] === "-h")) {
+  // Namespaced commands like `server` handle their own subcommand help;
+  // short-circuiting here would hide per-subcommand usage.
+  if (
+    command &&
+    command !== "server" &&
+    command !== "client" &&
+    command !== "local" &&
+    (args[1] === "--help" || args[1] === "-h")
+  ) {
     usage();
     process.exit(0);
   }
@@ -108,20 +123,22 @@ async function main(): Promise<void> {
 
   switch (command) {
     case "connect": {
-      const tokenUrl = args[1];
-      if (!tokenUrl) {
-        console.error("Usage: pty-relay connect <token-url> [--spawn <name>]");
+      const tokenUrlOrLabel = args[1];
+      if (!tokenUrlOrLabel) {
+        console.error("Usage: pty-relay connect <token-url-or-host-label> [--session <name>]");
         process.exit(1);
       }
       const spawnName = getFlag("--spawn");
       const spawnCwd = getFlag("--cwd");
+      const sessionName = getFlag("--session");
       const configDir = getFlag("--config-dir") ?? undefined;
       const spawnTags = extractTagFlags(args.slice(1));
       const { connect } = await import("./commands/connect.ts");
-      await connect(tokenUrl, {
+      await connect(tokenUrlOrLabel, {
         spawn: spawnName ?? undefined,
         cwd: spawnCwd ?? undefined,
         tags: Object.keys(spawnTags).length > 0 ? spawnTags : undefined,
+        session: sessionName ?? undefined,
         configDir,
         passphraseFile,
       });
@@ -328,6 +345,19 @@ async function main(): Promise<void> {
       break;
     }
 
+    case "rename": {
+      const oldLabel = args[1];
+      const newLabel = args[2];
+      if (!oldLabel || !newLabel) {
+        console.error("Usage: pty-relay rename <old-label> <new-label>");
+        process.exit(1);
+      }
+      const configDir = getFlag("--config-dir") ?? undefined;
+      const { renameCommand } = await import("./commands/rename.ts");
+      await renameCommand(oldLabel, newLabel, { configDir, passphraseFile });
+      break;
+    }
+
     case "forget": {
       const label = args[1];
       if (!label) {
@@ -351,108 +381,6 @@ async function main(): Promise<void> {
       }
       await removeKnownHost(label, store);
       console.log(`Removed ${count > 1 ? `${count} entries for` : ""} "${label}".`);
-      break;
-    }
-
-    case "serve": {
-      // If -d/--detach is set, re-exec inside a pty session and exit.
-      // pty itself handles the "already inside a pty session" case, so we
-      // can blindly invoke `pty run -d --name relay-daemon -- pty-relay serve ...`
-      // and rely on pty to do the right thing.
-      if (hasFlag("-d") || hasFlag("--detach")) {
-        const { spawnSync } = await import("node:child_process");
-        // Strip -d/--detach and --name (those are for the outer pty wrapper
-        // only, not the inner pty-relay serve).
-        const forwardedArgs: string[] = [];
-        for (let i = 0; i < args.length; i++) {
-          const a = args[i];
-          if (a === "-d" || a === "--detach") continue;
-          if (a === "--name") {
-            i++; // also skip the value
-            continue;
-          }
-          forwardedArgs.push(a);
-        }
-        const name = getFlag("--name") ?? "relay-daemon";
-        const ptyArgs = [
-          "run",
-          "-d",
-          "--name",
-          name,
-          "--",
-          process.argv[0],
-          process.argv[1],
-          ...forwardedArgs,
-        ];
-        const result = spawnSync("pty", ptyArgs, { stdio: "inherit" });
-        if (result.status !== 0) {
-          process.exit(result.status ?? 1);
-        }
-
-        // Wait briefly for the daemon to come up, then peek and extract
-        // the token URL so the user has it even though they're detached.
-        await new Promise((r) => setTimeout(r, 1500));
-        const peek = spawnSync("pty", ["peek", name], {
-          encoding: "utf-8",
-          timeout: 5000,
-        });
-        const output = (peek.stdout || "") + (peek.stderr || "");
-        // Strip ANSI escapes for clean matching
-        const stripped = output.replace(
-          /\x1b\[[0-9;?]*[a-zA-Z]/g,
-          ""
-        );
-        const urlMatch = stripped.match(/Token URL:\s*(\S+)/);
-        const tailscaleMatch = stripped.match(/Tailscale:\s*(\S+)/);
-
-        console.log();
-        console.log(`Daemon running in pty session "${name}".`);
-        if (urlMatch) {
-          console.log(`Token URL: ${urlMatch[1]}`);
-        } else {
-          console.log(
-            `(Token URL not yet available; run 'pty peek ${name}' to see it.)`
-          );
-        }
-        if (tailscaleMatch) {
-          console.log(`Tailscale: ${tailscaleMatch[1]}`);
-          try {
-            const qr = spawnSync(
-              "qrencode",
-              ["-t", "ANSIUTF8", "-m", "1", tailscaleMatch[1]],
-              { encoding: "utf-8", stdio: ["ignore", "pipe", "ignore"], timeout: 2000 }
-            );
-            if (qr.status === 0 && qr.stdout) {
-              process.stdout.write(qr.stdout);
-            }
-          } catch {}
-        }
-        console.log();
-        console.log(`Attach:  pty attach ${name}`);
-        console.log(`Peek:    pty peek ${name}`);
-        console.log(`Stop:    pty kill ${name}`);
-        process.exit(0);
-      }
-
-      const portArg = args[1] && !args[1].startsWith("-") ? args[1] : getFlag("--port");
-      const port = parseInt(portArg || "8099", 10);
-      const configDir = getFlag("--config-dir") ?? undefined;
-      let allowNewSessions = hasFlag("--allow-new-sessions");
-      if (allowNewSessions && !hasFlag("--skip-allow-new-sessions-confirmation")) {
-        if (!await confirmAllowSpawn()) {
-          console.log("Spawn disabled.");
-          allowNewSessions = false;
-        }
-      }
-      const tailscale = hasFlag("--tailscale");
-      const autoApprove = hasFlag("--auto-approve");
-      const { serve } = await import("./commands/serve.ts");
-      await serve(port, configDir, {
-        allowNewSessions,
-        tailscale,
-        autoApprove,
-        passphraseFile,
-      });
       break;
     }
 
@@ -485,11 +413,12 @@ async function main(): Promise<void> {
       } else if (subcommand === "revoke") {
         const id = args[2];
         if (!id) {
-          console.error("Usage: pty-relay clients revoke <id>");
+          console.error("Usage: pty-relay clients revoke <id> [-y]");
           process.exit(1);
         }
+        const yes = hasFlag("--yes") || hasFlag("-y");
         const { clientsRevoke } = await import("./commands/clients.ts");
-        await clientsRevoke(id, opts);
+        await clientsRevoke(id, { ...opts, yes });
       } else if (subcommand === "invite") {
         const label = getFlag("--label") ?? undefined;
         const { clientsInvite } = await import("./commands/clients.ts");
@@ -567,10 +496,466 @@ async function main(): Promise<void> {
       break;
     }
 
+    case "server": {
+      await dispatchServer();
+      break;
+    }
+
+    case "client": {
+      await dispatchClient();
+      break;
+    }
+
+    case "local": {
+      await dispatchLocal();
+      break;
+    }
+
     default:
       usage();
       process.exit(command ? 1 : 0);
   }
+}
+
+async function dispatchServer(): Promise<void> {
+  const subcommand = args[1];
+
+  if (!subcommand || subcommand === "--help" || subcommand === "-h") {
+    serverUsage();
+    process.exit(subcommand ? 0 : 1);
+  }
+
+  const configDir = getFlag("--config-dir") ?? undefined;
+  const passphraseFile = getFlag("--passphrase-file") ?? undefined;
+  const relayUrl = getFlag("--relay") ?? "http://localhost:4000";
+
+  switch (subcommand) {
+    case "signin": {
+      const email = getFlag("--email");
+      const label = getFlag("--label") ?? hostname();
+      if (!email) {
+        console.error("Usage: pty-relay server signin --email <addr> [--relay <url>] [--label <name>]");
+        process.exit(1);
+      }
+      const { signinCommand } = await import("./commands/server/signin.ts");
+      await signinCommand({ email, relayUrl, label, configDir, passphraseFile });
+      break;
+    }
+
+    case "mint": {
+      const totpCode = getFlag("--totp-code") ?? undefined;
+      const ttlArg = getFlag("--ttl-seconds");
+      const ttlSeconds = ttlArg ? parseInt(ttlArg, 10) : undefined;
+      const { mintCommand } = await import("./commands/server/mint.ts");
+      await mintCommand({ totpCode, ttlSeconds, configDir, passphraseFile });
+      break;
+    }
+
+    case "start": {
+      const allowNewSessions = hasFlag("--allow-new-sessions");
+      const { startCommand } = await import("./commands/server/start.ts");
+      await startCommand(configDir, { allowNewSessions, passphraseFile });
+      break;
+    }
+
+    case "status": {
+      const { statusCommand } = await import("./commands/server/status.ts");
+      await statusCommand({
+        json: hasFlag("--json"),
+        configDir,
+        passphraseFile,
+      });
+      break;
+    }
+
+    case "hosts": {
+      const { hostsCommand } = await import("./commands/server/hosts.ts");
+      await hostsCommand({
+        json: hasFlag("--json"),
+        merge: hasFlag("--merge"),
+        configDir,
+        passphraseFile,
+      });
+      break;
+    }
+
+    case "totp": {
+      const totpSub = args[2];
+      if (totpSub !== "show" && totpSub !== "code") {
+        console.error("Usage: pty-relay server totp <show|code>");
+        process.exit(1);
+      }
+      const { totpCommand } = await import("./commands/server/totp.ts");
+      await totpCommand({
+        subcommand: totpSub,
+        configDir,
+        passphraseFile,
+      });
+      break;
+    }
+
+    case "rotate": {
+      const complete = hasFlag("--complete");
+      const roleArg = getFlag("--role");
+      if (roleArg !== "daemon" && roleArg !== "client") {
+        console.error(
+          "Usage: pty-relay server rotate --role <daemon|client> [--complete]"
+        );
+        process.exit(1);
+      }
+      const { rotateCommand } = await import("./commands/server/rotate.ts");
+      await rotateCommand({ role: roleArg, complete, configDir, passphraseFile });
+      break;
+    }
+
+    case "revoke": {
+      const keyOrLabel = args[2];
+      if (!keyOrLabel) {
+        console.error("Usage: pty-relay server revoke <key-or-label> [--force] [--yes]");
+        process.exit(1);
+      }
+      const force = hasFlag("--force");
+      const yes = hasFlag("--yes") || hasFlag("-y");
+      const { revokeCommand } = await import("./commands/server/revoke.ts");
+      await revokeCommand({ keyOrLabel, force, yes, configDir, passphraseFile });
+      break;
+    }
+
+    case "add-email": {
+      const email = args[2] ?? getFlag("--email");
+      if (!email) {
+        console.error("Usage: pty-relay server add-email <email>");
+        process.exit(1);
+      }
+      const emailCode = getFlag("--email-code") ?? undefined;
+      const { addEmailCommand } = await import("./commands/server/add-email.ts");
+      await addEmailCommand({ email, emailCode, configDir, passphraseFile });
+      break;
+    }
+
+    case "delete-account": {
+      const yes = hasFlag("--yes") || hasFlag("-y");
+      const { deleteAccountCommand } = await import(
+        "./commands/server/delete-account.ts"
+      );
+      await deleteAccountCommand({ yes, configDir, passphraseFile });
+      break;
+    }
+
+    default:
+      console.error(`Unknown server subcommand: ${subcommand}`);
+      serverUsage();
+      process.exit(1);
+  }
+}
+
+function serverUsage(): void {
+  console.log(`pty-relay server — public-relay account management
+
+Subcommands:
+  signin --email <addr>           Register this daemon on a public relay
+                                   (creates the account if the email is new)
+  signin --label <name>           Label this host advertises on the account
+  mint [--ttl-seconds N]          Mint a one-time preauth to invite a device
+                                   (produces a daemon-pinned client key on claim)
+  mint --totp-code <code>         Non-interactive TOTP code
+  start [--allow-new-sessions]    Run the daemon attached to a public relay
+  status [--json]                 Show this device's enrollment info
+  hosts [--merge] [--json]        List registered keys on this account
+                                   --merge adds peer daemons to known_hosts
+  totp show | totp code           Show the TOTP secret / current code
+                                   (only on the device that set it up)
+  rotate --role <daemon|client> [--complete]
+                                   Two-step Ed25519 key rotation (per role)
+  revoke <key-or-label> [-y] [--force]
+                                   Revoke a peer device's key (prompts for y/N)
+                                   --force for THIS device; -y to skip the prompt
+  add-email <email>               Add a secondary email to the account
+  delete-account [-y]             Permanently delete the account (prompts)
+
+Options:
+  --relay <url>                   Relay origin for signin (default: http://localhost:4000)
+  --config-dir <dir>              Override config directory
+  --passphrase-file <path>        Read passphrase from file (non-interactive)
+`);
+}
+
+/** Commands that live under `pty-relay client <cmd>` but reuse the
+ *  top-level handlers. Listed explicitly so typos fall through to
+ *  a "unknown client subcommand" error instead of silently doing
+ *  nothing. */
+const CLIENT_PASSTHROUGH_COMMANDS = new Set([
+  "ls",
+  "list",
+  "connect",
+  "peek",
+  "send",
+  "tag",
+  "events",
+  "rename",
+  "forget",
+]);
+
+async function dispatchClient(): Promise<void> {
+  const subcommand = args[1];
+
+  if (!subcommand || subcommand === "--help" || subcommand === "-h") {
+    clientUsage();
+    process.exit(subcommand ? 0 : 1);
+  }
+
+  if (subcommand === "signin") {
+    const configDir = getFlag("--config-dir") ?? undefined;
+    const passphraseFile = getFlag("--passphrase-file") ?? undefined;
+    const relayUrl = getFlag("--relay") ?? "http://localhost:4000";
+    const email = getFlag("--email");
+    const label = getFlag("--label") ?? hostname();
+    if (!email) {
+      console.error(
+        "Usage: pty-relay client signin --email <addr> [--relay <url>] [--label <name>]"
+      );
+      process.exit(1);
+    }
+    const { clientSigninCommand } = await import("./commands/client/signin.ts");
+    await clientSigninCommand({ email, relayUrl, label, configDir, passphraseFile });
+    return;
+  }
+
+  if (subcommand === "join") {
+    const configDir = getFlag("--config-dir") ?? undefined;
+    const passphraseFile = getFlag("--passphrase-file") ?? undefined;
+    const preauthUrl = args[2];
+    const label = getFlag("--label") ?? hostname();
+    const totpCode = getFlag("--totp-code") ?? undefined;
+    if (!preauthUrl) {
+      console.error(
+        "Usage: pty-relay client join <preauth-url> [--label <name>] [--totp-code <code>]"
+      );
+      process.exit(1);
+    }
+    const { joinCommand } = await import("./commands/client/join.ts");
+    await joinCommand({
+      preauthUrl,
+      label,
+      totpCode,
+      configDir,
+      passphraseFile,
+    });
+    return;
+  }
+
+  if (CLIENT_PASSTHROUGH_COMMANDS.has(subcommand)) {
+    // Strip "client" so the top-level switch sees the inner command at
+    // args[0] and its positional args at args[1..]. Flag parsing uses
+    // the same `args` array, so nothing else needs to change.
+    args.splice(0, 1);
+    await main();
+    return;
+  }
+
+  console.error(`Unknown client subcommand: ${subcommand}`);
+  clientUsage();
+  process.exit(1);
+}
+
+function clientUsage(): void {
+  console.log(`pty-relay client — use sessions exposed by daemons (public or self-hosted)
+
+Subcommands:
+  signin --email <addr>           Register this device as an account-wide
+                                   client on a public relay (account must
+                                   already exist).
+  signin --label <name>           Label this device's client key
+                                   carries on the account.
+  join <preauth-url>              Claim a one-time preauth to register
+                                   as a daemon-pinned client. Needs a
+                                   current TOTP code from the minting
+                                   device.
+  join --label <name>             Label this device advertises on the account
+  join --totp-code <code>         Non-interactive TOTP code
+
+  ls                              List known hosts and their sessions
+  connect <host-or-url>           Attach to a remote pty session
+  peek <host> <session>           Print a remote session's screen
+  send <host> <session> "text"    Send input to a remote session
+  tag <host> <session>            Show / set tags on a remote session
+  events <host>                   Follow events from a remote daemon
+  rename <old> <new>              Rename a saved known-host entry
+  forget <host-label>             Remove a saved host
+
+  All session commands transparently handle both self-hosted (token URL)
+  and public-relay hosts.
+
+Options:
+  --relay <url>                   Relay origin for signin (default: http://localhost:4000)
+  --config-dir <dir>              Override config directory
+  --passphrase-file <path>        Read passphrase from file (non-interactive)
+`);
+}
+
+async function dispatchLocal(): Promise<void> {
+  const subcommand = args[1];
+
+  if (!subcommand || subcommand === "--help" || subcommand === "-h") {
+    localUsage();
+    process.exit(subcommand ? 0 : 1);
+  }
+
+  if (subcommand === "start") {
+    // If -d/--detach is set, re-exec inside a pty session and exit.
+    // pty itself handles the "already inside a pty session" case, so we
+    // can blindly invoke `pty run -d --name relay-daemon -- pty-relay local start ...`
+    // and rely on pty to do the right thing.
+    if (hasFlag("-d") || hasFlag("--detach")) {
+      const { spawnSync } = await import("node:child_process");
+      // Strip -d/--detach and --name (those are for the outer pty wrapper
+      // only, not the inner pty-relay local start).
+      const forwardedArgs: string[] = [];
+      for (let i = 0; i < args.length; i++) {
+        const a = args[i];
+        if (a === "-d" || a === "--detach") continue;
+        if (a === "--name") {
+          i++;
+          continue;
+        }
+        forwardedArgs.push(a);
+      }
+      const name = getFlag("--name") ?? "relay-daemon";
+      const ptyArgs = [
+        "run",
+        "-d",
+        "--name",
+        name,
+        "--",
+        process.argv[0],
+        process.argv[1],
+        ...forwardedArgs,
+      ];
+      const result = spawnSync("pty", ptyArgs, { stdio: "inherit" });
+      if (result.status !== 0) {
+        process.exit(result.status ?? 1);
+      }
+
+      await new Promise((r) => setTimeout(r, 1500));
+      const peek = spawnSync("pty", ["peek", name], {
+        encoding: "utf-8",
+        timeout: 5000,
+      });
+      const output = (peek.stdout || "") + (peek.stderr || "");
+      const stripped = output.replace(/\x1b\[[0-9;?]*[a-zA-Z]/g, "");
+      const urlMatch = stripped.match(/Token URL:\s*(\S+)/);
+      const tailscaleMatch = stripped.match(/Tailscale:\s*(\S+)/);
+
+      console.log();
+      console.log(`Daemon running in pty session "${name}".`);
+      if (urlMatch) {
+        console.log(`Token URL: ${urlMatch[1]}`);
+      } else {
+        console.log(
+          `(Token URL not yet available; run 'pty peek ${name}' to see it.)`
+        );
+      }
+      if (tailscaleMatch) {
+        console.log(`Tailscale: ${tailscaleMatch[1]}`);
+        try {
+          const qr = spawnSync(
+            "qrencode",
+            ["-t", "ANSIUTF8", "-m", "1", tailscaleMatch[1]],
+            { encoding: "utf-8", stdio: ["ignore", "pipe", "ignore"], timeout: 2000 }
+          );
+          if (qr.status === 0 && qr.stdout) {
+            process.stdout.write(qr.stdout);
+          }
+        } catch {}
+      }
+      console.log();
+      console.log(`Attach:  pty attach ${name}`);
+      console.log(`Peek:    pty peek ${name}`);
+      console.log(`Stop:    pty kill ${name}`);
+      process.exit(0);
+    }
+
+    // args[2] is the positional port (if not a flag); args[0] == "local",
+    // args[1] == "start". Flag parsing looks at the full argv, which is fine.
+    const portArg = args[2] && !args[2].startsWith("-") ? args[2] : getFlag("--port");
+    const port = parseInt(portArg || "8099", 10);
+    const configDir = getFlag("--config-dir") ?? undefined;
+    const passphraseFile = getFlag("--passphrase-file") ?? undefined;
+    let allowNewSessions = hasFlag("--allow-new-sessions");
+    if (allowNewSessions && !hasFlag("--skip-allow-new-sessions-confirmation")) {
+      if (!(await confirmAllowSpawn())) {
+        console.log("Spawn disabled.");
+        allowNewSessions = false;
+      }
+    }
+    const tailscale = hasFlag("--tailscale");
+    const autoApprove = hasFlag("--auto-approve");
+    const { start } = await import("./commands/start.ts");
+    await start(port, configDir, {
+      allowNewSessions,
+      tailscale,
+      autoApprove,
+      passphraseFile,
+    });
+    return;
+  }
+
+  if (subcommand === "status") {
+    const configDir = getFlag("--config-dir") ?? undefined;
+    const passphraseFile = getFlag("--passphrase-file") ?? undefined;
+    const { localStatusCommand } = await import("./commands/local/status.ts");
+    await localStatusCommand({
+      json: hasFlag("--json"),
+      showToken: hasFlag("--show-token"),
+      configDir,
+      passphraseFile,
+    });
+    return;
+  }
+
+  if (subcommand === "reset") {
+    const configDir = getFlag("--config-dir") ?? undefined;
+    const force = hasFlag("--force");
+    const { localResetCommand } = await import("./commands/local/reset.ts");
+    await localResetCommand({ configDir, force });
+    return;
+  }
+
+  console.error(`Unknown local subcommand: ${subcommand}`);
+  localUsage();
+  process.exit(1);
+}
+
+function localUsage(): void {
+  console.log(`pty-relay local — run a self-hosted relay on this machine
+
+Subcommands:
+  start [port]                    Run a self-hosted relay (default: 8099)
+                                   No accounts, no email; auth is the
+                                   #pk.secret fragment in the token URL
+                                   printed on startup.
+  start --tailscale               Proxy HTTPS via 'tailscale serve' so
+                                   the token URL reaches outside the LAN
+  start --auto-approve            Skip the per-client approval TUI
+  start --allow-new-sessions      Let remote clients spawn new pty sessions
+                                   (prompts unless --skip-allow-new-sessions-confirmation)
+  start -d [--name <label>]       Run detached in a 'pty' session
+                                   (default label: relay-daemon)
+  status [--show-token] [--json]  Show daemon pid, label, pubkey,
+                                   approved-client count. Prints the
+                                   token URL only with --show-token
+                                   (fragment contains auth material).
+  reset [--force]                 Wipe just self-hosted daemon state
+                                   (config, clients, daemon.pid).
+                                   Preserves public-relay enrollment
+                                   and known-hosts entries.
+                                   Prompts for confirmation unless
+                                   --force.
+
+Options:
+  --config-dir <dir>              Override config directory
+  --passphrase-file <path>        Read passphrase from file (non-interactive)
+`);
 }
 
 main().catch((err) => {

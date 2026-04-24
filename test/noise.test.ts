@@ -2,164 +2,241 @@ import { describe, it, expect, beforeAll } from "vitest";
 import {
   ready,
   generateKeypair,
-  InitiatorHandshake,
-  ResponderHandshake,
+  Handshake,
+  NK,
+  KK,
 } from "../src/crypto/index.ts";
 
 beforeAll(async () => {
   await ready();
 });
 
-describe("Noise NK handshake", () => {
+/** Run one complete two-message handshake between matched initiator
+ *  and responder instances and return their HandshakeResults. */
+function runHandshake(
+  initiator: Handshake,
+  responder: Handshake
+): { i: ReturnType<Handshake["split"]>; r: ReturnType<Handshake["split"]> } {
+  const hello = initiator.writeMessage();
+  responder.readMessage(hello);
+  const welcome = responder.writeMessage();
+  initiator.readMessage(welcome);
+  return { i: initiator.split(), r: responder.split() };
+}
+
+describe("Noise NK handshake (self-hosted: anonymous client)", () => {
   it("both sides compute the same transport keys", () => {
     const daemon = generateKeypair();
+    const i = new Handshake({
+      pattern: NK,
+      initiator: true,
+      remoteStaticPublicKey: daemon.publicKey,
+    });
+    const r = new Handshake({
+      pattern: NK,
+      initiator: false,
+      staticKeys: { publicKey: daemon.publicKey, privateKey: daemon.secretKey },
+    });
+    const { i: iResult, r: rResult } = runHandshake(i, r);
 
-    // Client side (initiator)
-    const initiator = new InitiatorHandshake(daemon.publicKey);
-    const hello = initiator.writeHello();
-    expect(hello.length).toBe(32);
-
-    // Daemon side (responder)
-    const responder = new ResponderHandshake(
-      daemon.publicKey,
-      daemon.secretKey
-    );
-    responder.readHello(hello);
-    const { message: welcome, result: responderResult } =
-      responder.writeWelcome();
-    expect(welcome.length).toBe(32);
-
-    // Client finalizes
-    const initiatorResult = initiator.readWelcome(welcome);
-
-    // Verify: initiator's send encrypts what responder's recv decrypts
     const testMsg = new TextEncoder().encode("test");
-    const encrypted = initiatorResult.send.encryptWithAd(
-      new Uint8Array(0),
-      testMsg
-    );
-    const decrypted = responderResult.recv.decryptWithAd(
-      new Uint8Array(0),
-      encrypted
-    );
-    expect(new TextDecoder().decode(decrypted)).toBe("test");
+    const enc = iResult.send.encryptWithAd(new Uint8Array(0), testMsg);
+    expect(new TextDecoder().decode(
+      rResult.recv.decryptWithAd(new Uint8Array(0), enc)
+    )).toBe("test");
 
-    // And vice versa
-    const testMsg2 = new TextEncoder().encode("reply");
-    const encrypted2 = responderResult.send.encryptWithAd(
-      new Uint8Array(0),
-      testMsg2
-    );
-    const decrypted2 = initiatorResult.recv.decryptWithAd(
-      new Uint8Array(0),
-      encrypted2
-    );
-    expect(new TextDecoder().decode(decrypted2)).toBe("reply");
+    const reply = new TextEncoder().encode("reply");
+    const enc2 = rResult.send.encryptWithAd(new Uint8Array(0), reply);
+    expect(new TextDecoder().decode(
+      iResult.recv.decryptWithAd(new Uint8Array(0), enc2)
+    )).toBe("reply");
   });
 
-  it("produces different keys for different daemon keypairs", () => {
-    const daemon1 = generateKeypair();
-    const daemon2 = generateKeypair();
+  it("different daemon keypairs produce independent streams", () => {
+    const d1 = generateKeypair();
+    const d2 = generateKeypair();
 
-    const initiator1 = new InitiatorHandshake(daemon1.publicKey);
-    const hello1 = initiator1.writeHello();
-    const responder1 = new ResponderHandshake(
-      daemon1.publicKey,
-      daemon1.secretKey
+    const { r: r1 } = runHandshake(
+      new Handshake({ pattern: NK, initiator: true, remoteStaticPublicKey: d1.publicKey }),
+      new Handshake({ pattern: NK, initiator: false, staticKeys: { publicKey: d1.publicKey, privateKey: d1.secretKey } })
     );
-    responder1.readHello(hello1);
-    const { result: result1 } = responder1.writeWelcome();
-
-    const initiator2 = new InitiatorHandshake(daemon2.publicKey);
-    const hello2 = initiator2.writeHello();
-    const responder2 = new ResponderHandshake(
-      daemon2.publicKey,
-      daemon2.secretKey
+    const { r: r2 } = runHandshake(
+      new Handshake({ pattern: NK, initiator: true, remoteStaticPublicKey: d2.publicKey }),
+      new Handshake({ pattern: NK, initiator: false, staticKeys: { publicKey: d2.publicKey, privateKey: d2.secretKey } })
     );
-    responder2.readHello(hello2);
-    const { result: result2 } = responder2.writeWelcome();
 
-    // Different daemon keys → different encrypted outputs for same plaintext
     const msg = new TextEncoder().encode("same message");
-    const enc1 = result1.send.encryptWithAd(new Uint8Array(0), msg);
-    const enc2 = result2.send.encryptWithAd(new Uint8Array(0), msg);
-
+    const enc1 = r1.send.encryptWithAd(new Uint8Array(0), msg);
+    const enc2 = r2.send.encryptWithAd(new Uint8Array(0), msg);
     expect(Buffer.from(enc1).equals(Buffer.from(enc2))).toBe(false);
   });
 
-  it("full handshake simulation without network", () => {
+  it("rejects a HELLO with the wrong size", () => {
     const daemon = generateKeypair();
-
-    // Initiator (client) creates HELLO
-    const initiator = new InitiatorHandshake(daemon.publicKey);
-    const hello = initiator.writeHello();
-
-    // Responder (daemon) receives HELLO, creates WELCOME
-    const responder = new ResponderHandshake(
-      daemon.publicKey,
-      daemon.secretKey
-    );
-    responder.readHello(hello);
-    const { message: welcome, result: rResult } = responder.writeWelcome();
-
-    // Initiator receives WELCOME
-    const iResult = initiator.readWelcome(welcome);
-
-    // Client encrypts "ping" → Daemon decrypts
-    const ping = new TextEncoder().encode("ping");
-    const encPing = iResult.send.encryptWithAd(new Uint8Array(0), ping);
-    const decPing = rResult.recv.decryptWithAd(new Uint8Array(0), encPing);
-    expect(new TextDecoder().decode(decPing)).toBe("ping");
-
-    // Daemon encrypts "pong" → Client decrypts
-    const pong = new TextEncoder().encode("pong");
-    const encPong = rResult.send.encryptWithAd(new Uint8Array(0), pong);
-    const decPong = iResult.recv.decryptWithAd(new Uint8Array(0), encPong);
-    expect(new TextDecoder().decode(decPong)).toBe("pong");
+    const r = new Handshake({
+      pattern: NK,
+      initiator: false,
+      staticKeys: { publicKey: daemon.publicKey, privateKey: daemon.secretKey },
+    });
+    expect(() => r.readMessage(new Uint8Array(16))).toThrow(/truncated/);
   });
 
-  it("rejects HELLO with wrong size", () => {
-    const daemon = generateKeypair();
-    const responder = new ResponderHandshake(
-      daemon.publicKey,
-      daemon.secretKey
-    );
+  it("handshake fails at transcript time if the responder's key doesn't match what the initiator expected", () => {
+    const real = generateKeypair();
+    const fake = generateKeypair();
 
-    expect(() => responder.readHello(new Uint8Array(16))).toThrow(/32 bytes/);
+    const i = new Handshake({ pattern: NK, initiator: true, remoteStaticPublicKey: fake.publicKey });
+    const r = new Handshake({
+      pattern: NK,
+      initiator: false,
+      staticKeys: { publicKey: real.publicKey, privateKey: real.secretKey },
+    });
+
+    // Both sides mix their local view of `rs` into the handshake hash
+    // before any messages. If those differ, the chain keys diverge at
+    // message 1's `es` DH, and the empty authenticated payload that
+    // Noise always appends to each message no longer decrypts. The
+    // responder detects the mismatch when reading the initiator's
+    // message, not later during transport.
+    const hello = i.writeMessage();
+    expect(() => r.readMessage(hello)).toThrow(/ciphertext/);
   });
 
-  it("rejects WELCOME with wrong size", () => {
-    const daemon = generateKeypair();
-    const initiator = new InitiatorHandshake(daemon.publicKey);
-    initiator.writeHello();
+  it("throws at construction when the required key is missing", () => {
+    const d = generateKeypair();
+    expect(
+      () => new Handshake({ pattern: NK, initiator: true })
+    ).toThrow(/remoteStaticPublicKey/);
+    expect(
+      () => new Handshake({ pattern: NK, initiator: false })
+    ).toThrow(/staticKeys/);
+    // NK initiator must NOT need a static keypair — this should work.
+    expect(
+      () => new Handshake({
+        pattern: NK,
+        initiator: true,
+        remoteStaticPublicKey: d.publicKey,
+      })
+    ).not.toThrow();
+  });
+});
 
-    expect(() => initiator.readWelcome(new Uint8Array(16))).toThrow(/32 bytes/);
+describe("Noise KK handshake (public-mode: both parties registered)", () => {
+  it("both sides compute the same transport keys", () => {
+    const client = generateKeypair();
+    const daemon = generateKeypair();
+
+    const i = new Handshake({
+      pattern: KK,
+      initiator: true,
+      staticKeys: { publicKey: client.publicKey, privateKey: client.secretKey },
+      remoteStaticPublicKey: daemon.publicKey,
+    });
+    const r = new Handshake({
+      pattern: KK,
+      initiator: false,
+      staticKeys: { publicKey: daemon.publicKey, privateKey: daemon.secretKey },
+      remoteStaticPublicKey: client.publicKey,
+    });
+
+    const { i: iResult, r: rResult } = runHandshake(i, r);
+
+    const msg = new TextEncoder().encode("kk round-trip");
+    const enc = iResult.send.encryptWithAd(new Uint8Array(0), msg);
+    expect(new TextDecoder().decode(
+      rResult.recv.decryptWithAd(new Uint8Array(0), enc)
+    )).toBe("kk round-trip");
   });
 
-  it("handshake fails if daemon public key doesn't match", () => {
-    const realDaemon = generateKeypair();
-    const fakeDaemon = generateKeypair();
+  it("a responder expecting the wrong client static key fails the handshake", () => {
+    const client = generateKeypair();
+    const wrong = generateKeypair();
+    const daemon = generateKeypair();
 
-    // Client thinks it's talking to fakeDaemon, but the responder is realDaemon
-    const initiator = new InitiatorHandshake(fakeDaemon.publicKey);
-    const hello = initiator.writeHello();
+    const i = new Handshake({
+      pattern: KK,
+      initiator: true,
+      staticKeys: { publicKey: client.publicKey, privateKey: client.secretKey },
+      remoteStaticPublicKey: daemon.publicKey,
+    });
+    const r = new Handshake({
+      pattern: KK,
+      initiator: false,
+      staticKeys: { publicKey: daemon.publicKey, privateKey: daemon.secretKey },
+      remoteStaticPublicKey: wrong.publicKey, // LIED about who's connecting
+    });
 
-    const responder = new ResponderHandshake(
-      realDaemon.publicKey,
-      realDaemon.secretKey
-    );
-    responder.readHello(hello);
-    const { message: welcome, result: rResult } = responder.writeWelcome();
+    // KK mixes both statics pre-message. If the responder's view of
+    // the initiator's static differs from what the initiator actually
+    // holds, the chaining key diverges at `ss` and the responder can't
+    // decrypt the first message's authenticated payload. That's the
+    // whole point of KK vs NK — impersonation dies at handshake time.
+    const hello = i.writeMessage();
+    expect(() => r.readMessage(hello)).toThrow(/ciphertext/);
+  });
 
-    // Client gets different keys (wrong daemon public key in handshake hash)
-    const iResult = initiator.readWelcome(welcome);
+  it("KK requires both sides' static keys at construction", () => {
+    const d = generateKeypair();
+    const c = generateKeypair();
 
-    // Decryption should fail because the symmetric states diverged
-    const msg = new TextEncoder().encode("secret");
-    const encrypted = iResult.send.encryptWithAd(new Uint8Array(0), msg);
+    expect(
+      () => new Handshake({
+        pattern: KK,
+        initiator: true,
+        remoteStaticPublicKey: d.publicKey,
+        // missing staticKeys
+      })
+    ).toThrow(/staticKeys/);
 
-    expect(() =>
-      rResult.recv.decryptWithAd(new Uint8Array(0), encrypted)
-    ).toThrow();
+    expect(
+      () => new Handshake({
+        pattern: KK,
+        initiator: true,
+        staticKeys: { publicKey: c.publicKey, privateKey: c.secretKey },
+        // missing remoteStaticPublicKey
+      })
+    ).toThrow(/remoteStaticPublicKey/);
+  });
+});
+
+describe("Handshake driver behavior", () => {
+  it("isMyTurn / isComplete track message progress", () => {
+    const d = generateKeypair();
+    const i = new Handshake({ pattern: NK, initiator: true, remoteStaticPublicKey: d.publicKey });
+    const r = new Handshake({
+      pattern: NK,
+      initiator: false,
+      staticKeys: { publicKey: d.publicKey, privateKey: d.secretKey },
+    });
+
+    expect(i.isMyTurn()).toBe(true);
+    expect(r.isMyTurn()).toBe(false);
+    expect(i.isComplete()).toBe(false);
+
+    const hello = i.writeMessage();
+    expect(i.isMyTurn()).toBe(false);
+    r.readMessage(hello);
+    expect(r.isMyTurn()).toBe(true);
+
+    const welcome = r.writeMessage();
+    expect(r.isComplete()).toBe(true);
+    i.readMessage(welcome);
+    expect(i.isComplete()).toBe(true);
+  });
+
+  it("throws if writeMessage is called out of turn", () => {
+    const d = generateKeypair();
+    const r = new Handshake({
+      pattern: NK,
+      initiator: false,
+      staticKeys: { publicKey: d.publicKey, privateKey: d.secretKey },
+    });
+    expect(() => r.writeMessage()).toThrow(/not our turn/);
+  });
+
+  it("throws if split() is called before completion", () => {
+    const d = generateKeypair();
+    const i = new Handshake({ pattern: NK, initiator: true, remoteStaticPublicKey: d.publicKey });
+    expect(() => i.split()).toThrow(/not complete/);
   });
 });

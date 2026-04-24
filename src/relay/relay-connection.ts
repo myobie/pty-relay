@@ -1,30 +1,102 @@
 import WebSocket from "ws";
+import sodium from "libsodium-wrappers-sumo";
 import {
-  ResponderHandshake,
+  Handshake,
+  NK,
+  KK,
   Transport,
+  type Pattern,
 } from "../crypto/index.ts";
 import type { Config } from "../crypto/index.ts";
 
+/** Turn a rejected WS upgrade into a human-readable error string.
+ *  Extracts the reason field from a JSON body when present; otherwise
+ *  includes the raw body (trimmed). Adds extra hints for the relay's
+ *  well-known 403 texts so a user with a pinned client key can tell
+ *  immediately why pairing failed. Exported for tests. */
+export function formatUpgradeRejection(status: number, body: string): string {
+  let reason = "";
+  const trimmed = body.trim();
+  if (trimmed) {
+    try {
+      const parsed = JSON.parse(trimmed);
+      if (parsed && typeof parsed === "object") {
+        const p = parsed as Record<string, unknown>;
+        if (typeof p.error === "string") reason = p.error;
+        else if (typeof p.reason === "string") reason = p.reason;
+        else if (typeof p.message === "string") reason = p.message;
+      }
+    } catch {
+      // Body wasn't JSON; surface it verbatim, capped.
+      reason = trimmed.length > 256 ? `${trimmed.slice(0, 256)}…` : trimmed;
+    }
+  }
+  let msg = `WS upgrade rejected with HTTP ${status}`;
+  if (reason) msg += `: ${reason}`;
+  // Known relay reason texts get a suggested next-action so the user
+  // isn't left guessing why pairing failed — the actionable info
+  // (check your pin, ask the daemon owner for an ACL row) isn't
+  // obvious from the bare reason.
+  const lowered = reason.toLowerCase();
+  if (lowered.includes("pinned to a different daemon")) {
+    msg +=
+      "\nThis client key was claimed via a preauth from a specific daemon and cannot pair with any other daemon on the account." +
+      "\nRun `pty-relay server status` to see which daemon this key is pinned to.";
+  } else if (lowered.includes("not permitted")) {
+    msg +=
+      "\nAn ACL row denies this client → daemon pair. Ask a daemon-role key-holder on the account to `pty-relay server acls allow` it.";
+  }
+  return msg;
+}
+
+/**
+ * Metadata that arrives in the relay's `paired` frame. Presence of a
+ * field signals which Noise pattern the peer expects:
+ *
+ *   - Only `pairing_hash_id`      → client_mint (NK; joiner is
+ *                                    anonymous, no registered key yet).
+ *   - Only `client_public_key`    → client_pair       (KK; both sides
+ *                                    are registered on the account).
+ *   - Neither                     → self-hosted paired (NK).
+ */
+export interface PairedMeta {
+  /** Present for enrollment peers; the daemon uses it as the
+   *  `preauth_hash_id` in the minter signing payload. */
+  pairing_hash_id?: string;
+  /** Present for client_pair peers; the daemon derives the peer's
+   *  Curve25519 Noise static via ed25519→curve25519 and feeds it into
+   *  the KK handshake as `remoteStaticPublicKey`. Base64url. */
+  client_public_key?: string;
+}
+
 export interface RelayEvents {
   onConnected?: () => void;
-  onPaired: () => void;
+  onPaired: (meta: PairedMeta) => void;
   onHandshakeComplete: (transport: Transport) => void;
   onEncryptedMessage: (plaintext: Uint8Array) => void;
   onPeerDisconnected: () => void;
   onError: (error: Error) => void;
   onClose: (code?: number) => void;
+  /** Relay sent `{"type":"revoked"}` (followed shortly by close code
+   *  4001). The caller's auth key is no longer valid on this relay —
+   *  don't auto-reconnect. Optional; callers without a handler fall
+   *  back to onClose + whatever reconnect policy they have. */
+  onRevoked?: () => void;
 }
 
 /**
- * Manages the WebSocket connection to the relay as a daemon.
- * Handles pairing, Noise NK handshake, and encrypted message forwarding.
+ * Daemon-side WebSocket + Noise responder.
  *
- * The daemon does not send pings — clients are responsible for keepalive.
+ * Noise pattern is chosen at pair time from the paired frame's
+ * metadata — the caller doesn't need to know which kind of client is
+ * arriving. The daemon always contributes its static Curve25519
+ * keypair (required for NK's responder pre-message and for KK's
+ * `ss`/`es`/`se`).
  */
 export class RelayConnection {
   private ws: WebSocket | null = null;
   private transport: Transport | null = null;
-  private handshake: ResponderHandshake | null = null;
+  private handshake: Handshake | null = null;
   private config: Config;
   private wsUrlFactory: string | (() => string);
   private events: RelayEvents;
@@ -37,13 +109,13 @@ export class RelayConnection {
     this.events = events;
   }
 
-  /** Connect to the relay. */
   connect(): void {
     this.state = "connecting";
     this.transport = null;
     this.handshake = null;
 
-    const url = typeof this.wsUrlFactory === "function" ? this.wsUrlFactory() : this.wsUrlFactory;
+    const url =
+      typeof this.wsUrlFactory === "function" ? this.wsUrlFactory() : this.wsUrlFactory;
     this.ws = new WebSocket(url);
     this.ws.binaryType = "nodebuffer";
 
@@ -60,27 +132,83 @@ export class RelayConnection {
       }
     });
 
-    this.ws.on("close", (code: number) => {
+    this.ws.on("close", (code: number, reason: Buffer) => {
+      // unexpected-response already closed us out and called onClose.
+      // The subsequent ws "close" event (which fires after req.destroy)
+      // would otherwise log a second "disconnected" and re-teardown.
+      if (this.state === "closed") return;
       this.state = "closed";
+      if (process.env.PTY_RELAY_DEBUG) {
+        console.error(
+          `[relay-conn] close code=${code} reason="${reason?.toString?.() ?? ""}"`
+        );
+      }
       this.events.onClose(code);
     });
 
     this.ws.on("error", (err: Error) => {
+      if (process.env.PTY_RELAY_DEBUG) {
+        console.error(
+          `[relay-conn] ws error: ${err?.message ?? "(empty)"} type=${(err as any)?.type ?? "?"} code=${(err as any)?.code ?? "?"}`
+        );
+      }
       this.events.onError(err);
+    });
+
+    this.ws.on("unexpected-response", (req, res) => {
+      if (process.env.PTY_RELAY_DEBUG) {
+        console.error(
+          `[relay-conn] unexpected-response status=${res.statusCode} headers=${JSON.stringify(res.headers)}`
+        );
+      }
+      // Registering an 'unexpected-response' listener suppresses ws's
+      // default auto-close, so we have to tear the request down
+      // ourselves. Without this, the socket lingers and onClose never
+      // fires — which in server/serve.ts means the ClientSession row
+      // stays pinned in the MAX_CLIENTS-bounded map forever.
+      //
+      // Read a small bounded slice of the response body so the 403
+      // reason text from the relay (e.g. "client is pinned to a
+      // different daemon") reaches the user. Capped at 4KB — the
+      // relay's bodies are always short JSON/text; anything larger
+      // is unexpected and we'd rather cut it off than buffer pages.
+      const chunks: Buffer[] = [];
+      let total = 0;
+      const MAX = 4096;
+      res.on("data", (chunk: Buffer) => {
+        if (total >= MAX) return;
+        const take = Math.min(chunk.length, MAX - total);
+        chunks.push(chunk.subarray(0, take));
+        total += take;
+      });
+      res.on("end", () => {
+        const body = chunks.length ? Buffer.concat(chunks).toString("utf8") : "";
+        try { req.destroy(); } catch {}
+        this.events.onError(
+          new Error(formatUpgradeRejection(res.statusCode ?? 0, body))
+        );
+        this.state = "closed";
+        this.events.onClose(res.statusCode);
+      });
+      res.on("error", () => {
+        try { req.destroy(); } catch {}
+        this.events.onError(
+          new Error(`WS upgrade rejected with HTTP ${res.statusCode}`)
+        );
+        this.state = "closed";
+        this.events.onClose(res.statusCode);
+      });
     });
   }
 
-  /** Send an encrypted message through the tunnel. */
   send(plaintext: Uint8Array): void {
     if (!this.transport || !this.ws || this.state !== "ready") {
       throw new Error("Not ready to send");
     }
-
     const ciphertext = this.transport.encrypt(plaintext);
     this.ws.send(ciphertext);
   }
 
-  /** Close the connection. */
   close(): void {
     this.state = "closed";
     this.ws?.close();
@@ -93,43 +221,99 @@ export class RelayConnection {
   // ── Message Handling ──
 
   private handleTextMessage(text: string): void {
-    try {
-      const msg = JSON.parse(text);
+    let msg: any;
+    try { msg = JSON.parse(text); } catch { return; }
 
-      switch (msg.type) {
-        case "paired":
-          this.state = "handshaking";
-          this.handshake = new ResponderHandshake(
-            this.config.publicKey,
-            this.config.secretKey
-          );
-          this.events.onPaired();
+    switch (msg.type) {
+      case "paired": {
+        const meta: PairedMeta = {
+          pairing_hash_id:
+            typeof msg.pairing_hash_id === "string" ? msg.pairing_hash_id : undefined,
+          client_public_key:
+            typeof msg.client_public_key === "string" ? msg.client_public_key : undefined,
+        };
+        // beginHandshake is synchronous by design: both `state =
+        // "handshaking"` and `this.handshake = ...` must be set before
+        // the *next* event-loop turn, otherwise a binary frame that
+        // arrives in between would be dropped silently. The Curve25519
+        // conversion we need for KK is a pure sync libsodium call;
+        // `await ready()` happened at daemon startup so no await is
+        // needed here.
+        try {
+          this.beginHandshake(meta);
+        } catch (err) {
+          this.events.onError(err instanceof Error ? err : new Error(String(err)));
+          this.close();
           break;
-
-        case "peer_disconnected":
-          this.transport = null;
-          this.handshake = null;
-          this.state = "waiting";
-          this.events.onPeerDisconnected();
-          break;
-
-        case "error":
-          this.events.onError(new Error(msg.message || "Relay error"));
-          break;
+        }
+        this.events.onPaired(meta);
+        break;
       }
-    } catch {
-      // Ignore unparseable text
+
+      case "peer_disconnected":
+        this.transport = null;
+        this.handshake = null;
+        this.state = "waiting";
+        this.events.onPeerDisconnected();
+        break;
+
+      case "error":
+        this.events.onError(new Error(msg.message || "Relay error"));
+        break;
+
+      case "revoked":
+        // Relay will follow up with close code 4001. Surface the
+        // revocation so callers can mark the key dead instead of
+        // looping on reconnect.
+        this.events.onRevoked?.();
+        break;
     }
+  }
+
+  /** Pick the Noise pattern from the paired metadata and construct
+   *  the responder Handshake. Synchronous — see the caller's comment
+   *  about the "paired → binary frame" race. */
+  private beginHandshake(meta: PairedMeta): void {
+    let pattern: Pattern;
+    let remoteStaticPublicKey: Uint8Array | undefined;
+
+    if (meta.client_public_key) {
+      pattern = KK;
+      const edBytes = sodium.from_base64(
+        meta.client_public_key,
+        sodium.base64_variants.URLSAFE_NO_PADDING
+      );
+      // Synchronous: libsodium's Ed25519→Curve25519 is a pure call,
+      // and `await sodium.ready` happened globally at daemon start.
+      remoteStaticPublicKey = sodium.crypto_sign_ed25519_pk_to_curve25519(edBytes);
+    } else {
+      pattern = NK;
+    }
+
+    // Assign handshake FIRST, then flip state. If this order is
+    // inverted, handleBinaryMessage's `state === "handshaking" &&
+    // this.handshake` guard could see (true, null) and silently drop
+    // the first Noise message from a fast initiator.
+    this.handshake = new Handshake({
+      pattern,
+      initiator: false,
+      staticKeys: {
+        publicKey: this.config.publicKey,
+        privateKey: this.config.secretKey,
+      },
+      remoteStaticPublicKey,
+    });
+    this.state = "handshaking";
   }
 
   private handleBinaryMessage(data: Buffer): void {
     if (this.state === "handshaking" && this.handshake) {
       try {
-        this.handshake.readHello(new Uint8Array(data));
-        const { message: welcome, result } = this.handshake.writeWelcome();
-
+        this.handshake.readMessage(new Uint8Array(data));
+        const welcome = this.handshake.writeMessage();
         this.ws!.send(welcome);
 
+        const result = this.handshake.split();
         this.transport = new Transport(result);
         this.state = "ready";
         this.handshake = null;
@@ -147,9 +331,7 @@ export class RelayConnection {
         this.events.onEncryptedMessage(plaintext);
       } catch (err) {
         // Decryption failure is fatal — nonce counters are now desynchronized
-        this.events.onError(
-          err instanceof Error ? err : new Error(String(err))
-        );
+        this.events.onError(err instanceof Error ? err : new Error(String(err)));
         this.close();
       }
     }
