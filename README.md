@@ -109,7 +109,13 @@ prints an `otpauth://` URL to add to an authenticator app. Then:
 pty-relay server start
 ```
 
-Leave it running (or wrap in `pty run -d --name relay-server --`).
+Leave it running in the foreground, or run detached:
+
+```bash
+pty-relay server start -d
+# reattach: pty attach relay-server
+# stop:     pty kill   relay-server
+```
 
 ### Another machine as a client
 
@@ -174,6 +180,8 @@ server signin --email <addr>    Register this machine as a daemon
   [--relay <url>]                   (defaults to http://localhost:4000)
 server start                    Run the daemon attached to a public relay
   [--allow-new-sessions]
+  -d [--name <label>]               Run detached in a 'pty' session
+                                     (default label: relay-server)
 server mint                     Mint a preauth URL (daemon-pinned client)
   [--ttl-seconds N]
   [--totp-code <code>]

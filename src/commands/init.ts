@@ -59,7 +59,15 @@ export async function initCommand(opts: InitOpts): Promise<void> {
   console.log(`Initialized secret storage at ${dir}`);
   console.log(`Backend: ${store.backend}`);
   console.log("");
-  console.log("Next steps:");
-  console.log("  pty-relay local start  # start the self-hosted relay");
-  console.log("  pty-relay connect URL  # connect to a remote daemon");
+  console.log("Next steps — pick a mode:");
+  console.log("");
+  console.log("  Self-hosted (one process on this machine, no accounts):");
+  console.log("    pty-relay local start [port]");
+  console.log("");
+  console.log("  Public relay (multi-tenant, email + TOTP auth):");
+  console.log("    pty-relay server signin --email you@example.com --relay https://relay.pty.computer");
+  console.log("    pty-relay server start");
+  console.log("");
+  console.log("  Or use an existing public-relay account as a client:");
+  console.log("    pty-relay client signin --email you@example.com --relay https://relay.pty.computer");
 }

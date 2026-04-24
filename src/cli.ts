@@ -65,7 +65,8 @@ Options:
                                    (for non-interactive startup, e.g. a pty session)
   --auto-approve            Skip client approval (allow all connections)
   --tailscale               Enable Tailscale HTTPS via 'tailscale serve'
-  -d, --detach              Run 'local start' in a detached pty session
+  -d, --detach              Run 'local start' / 'server start' in a
+                             detached pty session
   --name <label>            Name for the wrapped pty session (default: relay-daemon)
   --json                    Output as JSON (for ls)
   --spawn <name>            Spawn a new remote session (for connect)
@@ -552,6 +553,42 @@ async function dispatchServer(): Promise<void> {
     }
 
     case "start": {
+      // Symmetric with `local start -d`: re-exec inside a detached pty
+      // session and exit, so the daemon lives in a supervised session.
+      // No token URL to extract here (public-relay daemons dial
+      // outbound, no shareable URL), so the detached flow is simpler.
+      if (hasFlag("-d") || hasFlag("--detach")) {
+        const { spawnSync } = await import("node:child_process");
+        const forwardedArgs: string[] = [];
+        for (let i = 0; i < args.length; i++) {
+          const a = args[i];
+          if (a === "-d" || a === "--detach") continue;
+          if (a === "--name") { i++; continue; }
+          forwardedArgs.push(a);
+        }
+        const name = getFlag("--name") ?? "relay-server";
+        const ptyArgs = [
+          "run",
+          "-d",
+          "--name",
+          name,
+          "--",
+          process.argv[0],
+          process.argv[1],
+          ...forwardedArgs,
+        ];
+        const result = spawnSync("pty", ptyArgs, { stdio: "inherit" });
+        if (result.status !== 0) {
+          process.exit(result.status ?? 1);
+        }
+        console.log();
+        console.log(`Public-relay daemon running in pty session "${name}".`);
+        console.log(`Attach:  pty attach ${name}`);
+        console.log(`Peek:    pty peek ${name}`);
+        console.log(`Stop:    pty kill ${name}`);
+        process.exit(0);
+      }
+
       const allowNewSessions = hasFlag("--allow-new-sessions");
       const { startCommand } = await import("./commands/server/start.ts");
       await startCommand(configDir, { allowNewSessions, passphraseFile });
@@ -660,6 +697,8 @@ Subcommands:
                                    (produces a daemon-pinned client key on claim)
   mint --totp-code <code>         Non-interactive TOTP code
   start [--allow-new-sessions]    Run the daemon attached to a public relay
+  start -d [--name <label>]       Run detached in a 'pty' session
+                                   (default label: relay-server)
   status [--json]                 Show this device's enrollment info
   hosts [--merge] [--json]        List registered keys on this account
                                    --merge adds peer daemons to known_hosts
