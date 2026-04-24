@@ -26,7 +26,7 @@
     "build:browser": "node browser/build.mjs"
   },
   "peerDependencies": {
-    "@myobie/pty": ">=0.8.0"
+    "@myobie/pty": ">=0.10.0"
   },
   "dependencies": {
     "libsodium-wrappers-sumo": "^0.8.2",
