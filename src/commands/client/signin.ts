@@ -8,6 +8,7 @@ import {
   type KeyIdentity,
 } from "../../storage/public-account.ts";
 import { PublicApi, PublicApiError } from "../../relay/public-api.ts";
+import { mergeAccountDaemons } from "../server/hosts.ts";
 
 /**
  * `pty-relay client signin --email <addr>` — register a role=client key
@@ -186,6 +187,41 @@ export async function clientSigninCommand(opts: {
       ? { ...existing, clientKey: freshAccount.clientKey }
       : freshAccount;
     await savePublicAccount(merged, store);
+
+    // Auto-merge the account's daemons into known_hosts so the user
+    // can immediately run `client ls` / `client connect <label>`
+    // without a manual `server hosts --merge` step.
+    try {
+      const clientSigningKeys = {
+        public: sodium.from_base64(
+          merged.clientKey!.signingKeys.public,
+          sodium.base64_variants.URLSAFE_NO_PADDING
+        ),
+        secret: sodium.from_base64(
+          merged.clientKey!.signingKeys.secret,
+          sodium.base64_variants.URLSAFE_NO_PADDING
+        ),
+      };
+      const { added, pruned } = await mergeAccountDaemons(
+        api,
+        merged.relayUrl,
+        clientSigningKeys,
+        store
+      );
+      if (added > 0 || pruned > 0) {
+        console.log(
+          `Known-hosts synced: +${added} daemon(s)${pruned > 0 ? `, -${pruned} stale` : ""}.`
+        );
+      }
+    } catch (err: any) {
+      // Signin succeeded; known_hosts sync is a convenience. Don't
+      // fail the command if the merge fails — the user can re-run
+      // `server hosts --merge` later.
+      console.log(
+        `(Note: couldn't sync known_hosts automatically — run \`pty-relay server hosts --merge\` to populate. ${err?.message ?? err})`
+      );
+    }
+
     console.log("");
     console.log("Saved. `pty-relay client ls` will now show hosts on the account.");
   } catch (err: any) {

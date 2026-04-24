@@ -96,6 +96,59 @@ describe("hostsCommand --merge logic", () => {
   });
 });
 
+describe("mergeAccountDaemons", () => {
+  it("skips role=client entries and prunes stale client entries from known_hosts", async () => {
+    const { mergeAccountDaemons } = await import("../src/commands/server/hosts.ts");
+    const store = new MemStore();
+
+    // A pre-existing known_hosts entry for a client key. An older
+    // CLI version may have saved these; the fixed merge path should
+    // prune them, since clients aren't pair targets and `ls` would
+    // just get 403s.
+    await savePublicKnownHost(
+      {
+        label: "some-phone",
+        relayUrl: "http://localhost:4000",
+        publicKey: "pk_client_old",
+        role: "client",
+      },
+      store
+    );
+
+    const kp = sodium.crypto_sign_keypair();
+    // Stub fetch with a response containing a daemon + a client. Only
+    // the daemon should end up in known_hosts afterward.
+    globalThis.fetch = (async (_input: RequestInfo | URL) => {
+      return new Response(
+        JSON.stringify({
+          account_id: "01HVCACCT",
+          hosts: [
+            { public_key: "pk_daemon", label: "laptop-a", role: "daemon", status: "online" },
+            { public_key: "pk_client_new", label: "phone", role: "client", status: "offline" },
+          ],
+        }),
+        { status: 200, headers: { "content-type": "application/json" } }
+      );
+    }) as typeof fetch;
+
+    const api = new PublicApi("http://localhost:4000");
+    const { added, pruned } = await mergeAccountDaemons(
+      api,
+      "http://localhost:4000",
+      { public: kp.publicKey, secret: kp.privateKey },
+      store
+    );
+
+    const hosts = await loadKnownHosts(store);
+    expect(hosts).toHaveLength(1);
+    expect(hosts[0].publicKey).toBe("pk_daemon");
+    expect(hosts[0].role).toBe("daemon");
+    // Prune counted the stale client entry; merge counted the one daemon.
+    expect(pruned).toBe(1);
+    expect(added).toBe(1);
+  });
+});
+
 describe("hostsCommand HTTP call shape", () => {
   it("GETs /api/hosts with signed auth params", async () => {
     const kp = sodium.crypto_sign_keypair();
