@@ -16,7 +16,7 @@ import { log } from "../log.ts";
  * - client connects with role=client -> gets assigned a client_id
  * - daemon connects with role=daemon&client_id=X -> per-client data socket
  */
-export function createRelayServer(port: number, htmlPath?: string) {
+export function createRelayServer(port: number, htmlPath?: string, host?: string) {
   const registry = new PairingRegistry();
 
   // Read HTML for web UI serving
@@ -152,10 +152,15 @@ export function createRelayServer(port: number, htmlPath?: string) {
     start(): Promise<void> {
       return new Promise((resolve, reject) => {
         httpServer.on("error", reject);
-        httpServer.listen(port, () => {
-          log("pairing", "self-hosted http/ws listening", { port });
+        const onListening = () => {
+          log("pairing", "self-hosted http/ws listening", { port, host });
           resolve();
-        });
+        };
+        if (host) {
+          httpServer.listen(port, host, onListening);
+        } else {
+          httpServer.listen(port, onListening);
+        }
       });
     },
 
@@ -168,5 +173,6 @@ export function createRelayServer(port: number, htmlPath?: string) {
     },
 
     port,
+    host,
   };
 }

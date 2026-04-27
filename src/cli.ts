@@ -81,6 +81,11 @@ Options:
                                    (for non-interactive startup, e.g. a pty session)
   --auto-approve            Skip client approval (allow all connections)
   --tailscale               Enable Tailscale HTTPS via 'tailscale serve'
+  --bind <addr>             Address the HTTP/WS server binds to. Defaults to
+                             127.0.0.1 when --tailscale is set (tailscale serve
+                             proxies tailnet -> 127.0.0.1:port), otherwise binds
+                             to all interfaces. Pass 0.0.0.0 to opt back in to
+                             LAN access when --tailscale is enabled.
   -d, --detach              Run 'local start' / 'server start' in a
                              detached pty session
   --name <label>            Name for the wrapped pty session (default: relay-daemon)
@@ -954,12 +959,22 @@ async function dispatchLocal(): Promise<void> {
     }
     const tailscale = hasFlag("--tailscale");
     const autoApprove = hasFlag("--auto-approve");
+    // Default bind: loopback when --tailscale is set (tailscale serve
+    // proxies tailnet -> 127.0.0.1:port). Otherwise leave undefined to
+    // preserve the historical all-interfaces behavior for non-tailscale
+    // users (e.g. exposing on a LAN). See src/serve/bind-host.ts.
+    const { resolveBindHost } = await import("./serve/bind-host.ts");
+    const bind = resolveBindHost({
+      explicit: getFlag("--bind"),
+      tailscale,
+    });
     const { start } = await import("./commands/start.ts");
     await start(port, configDir, {
       allowNewSessions,
       tailscale,
       autoApprove,
       passphraseFile,
+      bind,
     });
     return;
   }
@@ -999,7 +1014,12 @@ Subcommands:
                                    #pk.secret fragment in the token URL
                                    printed on startup.
   start --tailscale               Proxy HTTPS via 'tailscale serve' so
-                                   the token URL reaches outside the LAN
+                                   the token URL reaches outside the LAN.
+                                   Implies --bind 127.0.0.1 (override
+                                   with --bind 0.0.0.0 to also expose
+                                   the LAN listener).
+  start --bind <addr>             Bind address (default: all interfaces;
+                                   127.0.0.1 when --tailscale is set)
   start --auto-approve            Skip the per-client approval TUI
   start --allow-new-sessions      Let remote clients spawn new pty sessions
                                    (prompts unless --skip-allow-new-sessions-confirmation)

@@ -64,6 +64,7 @@ export async function start(
     tailscale?: boolean;
     autoApprove?: boolean;
     passphraseFile?: string;
+    bind?: string;
   }
 ): Promise<void> {
   log("cli", "local start begin", {
@@ -72,6 +73,7 @@ export async function start(
     tailscale: !!options?.tailscale,
     autoApprove: !!options?.autoApprove,
     allowNewSessions: !!options?.allowNewSessions,
+    bind: options?.bind,
   });
   const relay = `localhost:${port}`;
   const { config, secretHash, store } = await loadDaemonConfig(
@@ -84,7 +86,7 @@ export async function start(
 
   // Start the relay server, serving the web UI from the bundled browser client
   const htmlPath = path.resolve(import.meta.dirname, "../../browser/dist/index.html");
-  const server = createRelayServer(port, htmlPath);
+  const server = createRelayServer(port, htmlPath, options?.bind);
   await server.start();
 
   const tokenUrl = getTokenUrl(relay, config);
@@ -97,7 +99,8 @@ export async function start(
     console.log("Client approval enabled. Use --auto-approve to skip.");
   }
 
-  console.log(`Self-hosted relay running on port ${port}`);
+  const boundHost = options?.bind ?? "0.0.0.0";
+  console.log(`Self-hosted relay running on ${boundHost}:${port}`);
   console.log(`Token URL: ${tokenUrl}`);
 
   // Tailscale HTTPS support

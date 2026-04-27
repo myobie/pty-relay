@@ -5,6 +5,21 @@ Pre-1.0 we reserve the right to break on minor bumps.
 
 ## [Unreleased]
 
+### Changed
+
+- `pty-relay local start --tailscale` now binds the underlying
+  HTTP/WebSocket server to `127.0.0.1` by default, instead of all
+  interfaces. With `tailscale serve` proxying tailnet traffic to
+  loopback, the LAN-facing listener was an unintentional secondary
+  ingress. The new `--bind <addr>` flag lets you override (e.g.
+  `--bind 0.0.0.0` to restore the previous LAN behavior). Without
+  `--tailscale`, the historical all-interfaces default is unchanged.
+  Closes #1.
+
+  **Migration:** if you were running `local start --tailscale` and
+  relying on connecting to `<lan-ip>:<port>` from another machine on
+  the LAN, add `--bind 0.0.0.0` to your invocation.
+
 ### Initial public release
 
 - Self-hosted mode (`pty-relay local start`): one-process relay +
