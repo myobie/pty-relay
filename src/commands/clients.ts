@@ -11,6 +11,7 @@ import { loadDaemonConfig } from "../relay/config.ts";
 import { createToken } from "../crypto/token.ts";
 import { ready } from "../crypto/keys.ts";
 import { openSecretStore } from "../storage/bootstrap.ts";
+import { log } from "../log.ts";
 
 interface CmdOpts {
   configDir?: string;
@@ -24,6 +25,7 @@ interface CmdOpts {
 export async function clientsList(
   opts: CmdOpts & { json?: boolean } = {}
 ): Promise<void> {
+  log("cli", "clients list begin", { json: !!opts.json });
   const { store } = await openSecretStore(opts.configDir, {
     interactive: true,
     passphraseFile: opts.passphraseFile,
@@ -143,6 +145,7 @@ export async function clientsApprove(
   idOrPrefix: string,
   opts: CmdOpts = {}
 ): Promise<void> {
+  log("cli", "clients approve begin", { idOrPrefix });
   const { store } = await openSecretStore(opts.configDir, {
     interactive: true,
     passphraseFile: opts.passphraseFile,
@@ -180,6 +183,7 @@ export async function clientsRevoke(
   idOrPrefix: string,
   opts: CmdOpts & { yes?: boolean } = {}
 ): Promise<void> {
+  log("cli", "clients revoke begin", { idOrPrefix, yes: !!opts.yes });
   const { store } = await openSecretStore(opts.configDir, {
     interactive: true,
     passphraseFile: opts.passphraseFile,
@@ -246,6 +250,7 @@ export async function clientsInvite(
   opts: CmdOpts = {}
 ): Promise<void> {
   await ready();
+  log("cli", "clients invite begin", { label });
 
   // Open the store once and reuse it for both loadDaemonConfig and saveClients.
   // loadDaemonConfig would open the store on its own, which (for passphrase

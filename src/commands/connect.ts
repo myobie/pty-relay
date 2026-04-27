@@ -14,6 +14,7 @@ import { Terminal } from "../terminal/terminal.ts";
 import { saveKnownHost } from "../relay/known-hosts.ts";
 import type { SecretStore } from "../storage/secret-store.ts";
 import { openSecretStore } from "../storage/bootstrap.ts";
+import { log } from "../log.ts";
 
 // Reconnect constants
 const RECONNECT_INITIAL_MS = 1000;
@@ -33,6 +34,13 @@ export async function connect(
   }
 ): Promise<void> {
   await ready();
+  log("cli", "connect begin", {
+    target: looksLikeTokenUrl(tokenUrlOrLabel) ? "token-url" : tokenUrlOrLabel,
+    spawn: options?.spawn,
+    cwd: options?.cwd,
+    session: options?.session,
+    hasTags: !!(options?.tags && Object.keys(options.tags).length > 0),
+  });
 
   // Dispatch: a raw http(s):// URL is a self-hosted token URL and goes
   // through the existing flow. Anything else is treated as a known-hosts
@@ -509,6 +517,15 @@ async function connectWithReconnect(
       onStatus: options.onStatus,
     });
 
+    log("bridge", "attempt ended", {
+      session,
+      attempt,
+      isReconnect,
+      reason: reason.kind,
+      ...(reason.kind === "error" ? { message: reason.message } : {}),
+      ...(reason.kind === "lost" ? { wasAttached: reason.wasAttached } : {}),
+    });
+
     switch (reason.kind) {
       case "detached":
         return "detached";
@@ -529,12 +546,14 @@ async function connectWithReconnect(
         }
 
         if (attempt >= MAX_RECONNECT_ATTEMPTS) {
+          log("bridge", "gave up reconnecting", { attempts: attempt });
           options.onStatus(`[gave up reconnecting after ${attempt} attempts]`);
           return "disconnected";
         }
 
         const delay = reconnectDelay(attempt);
         const delaySec = Math.round(delay / 1000);
+        log("bridge", "scheduling reconnect", { attempt, delayMs: delay });
         options.onStatus(
           `[disconnected — reconnecting in ${delaySec}s... ctrl+\\ to detach]`
         );
@@ -567,6 +586,7 @@ export async function connectEmbedded(
   options: { spawn?: string; cwd?: string; store: SecretStore }
 ): Promise<ConnectResult> {
   await ready();
+  log("cli", "connect embedded begin", { spawn: options.spawn, cwd: options.cwd });
 
   const parsed = parseToken(tokenUrl);
   const secretHash = computeSecretHash(parsed.secret);

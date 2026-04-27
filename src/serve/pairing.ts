@@ -1,5 +1,6 @@
 import { randomBytes } from "node:crypto";
 import type WebSocket from "ws";
+import { log } from "../log.ts";
 
 export interface ClientEntry {
   client: WebSocket;
@@ -75,6 +76,10 @@ export class PairingRegistry {
     ws.on("close", () => {
       const current = this.entries.get(secretHash);
       if (!current || current.primary !== ws) return;
+      log("pairing", "primary daemon closed, tearing down", {
+        clients: current.clients.size,
+        label: current.label,
+      });
 
       // Notify and close all clients
       for (const [, clientEntry] of current.clients) {
@@ -152,6 +157,7 @@ export class PairingRegistry {
 
       const ce = current.clients.get(clientId);
       if (!ce || ce.client !== ws) return;
+      log("pairing", "client closed", { clientId, hadDaemon: !!ce.daemon });
 
       // Notify paired per-client daemon if any
       if (ce.daemon) {
@@ -227,6 +233,7 @@ export class PairingRegistry {
 
       const ce = current.clients.get(clientId);
       if (!ce || ce.daemon !== ws) return;
+      log("pairing", "per-client daemon closed", { clientId });
 
       try {
         ce.client.send(JSON.stringify({ type: "peer_disconnected" }));

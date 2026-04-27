@@ -6,6 +6,7 @@ import {
 } from "@myobie/pty/protocol";
 import { getSocketPath } from "@myobie/pty/client";
 import type { RelayConnection } from "./relay-connection.ts";
+import { log, now, sinceMs } from "../log.ts";
 
 /**
  * Bridges a pty Unix socket session to an encrypted relay tunnel.
@@ -39,12 +40,15 @@ export class SessionBridge {
     return new Promise((resolve, reject) => {
       this.sessionName = session;
       const socketPath = getSocketPath(session);
+      const t0 = now();
+      log("bridge", "attach", { session, cols, rows, socketPath });
 
       this.socket = net.createConnection(socketPath);
 
       this.socket.on("connect", () => {
         // Send ATTACH packet to the pty server
         this.socket!.write(encodeAttach(rows, cols));
+        log("bridge", "attached", { session, ms: sinceMs(t0) });
         resolve();
       });
 
@@ -54,15 +58,24 @@ export class SessionBridge {
           this.relay.send(data);
         } catch (err) {
           // Relay not ready or closed
+          log("bridge", "relay send failed, closing", {
+            session: this.sessionName,
+            error: (err as Error)?.message,
+          });
           this.close();
         }
       });
 
       this.socket.on("close", () => {
+        log("bridge", "pty socket close", { session: this.sessionName });
         this.socket = null;
       });
 
       this.socket.on("error", (err: Error) => {
+        log("bridge", "pty socket error", {
+          session: this.sessionName,
+          error: err.message,
+        });
         this.socket = null;
         reject(err);
       });
@@ -82,6 +95,7 @@ export class SessionBridge {
   /** Close the pty socket connection. */
   close(): void {
     if (this.socket && !this.socket.destroyed) {
+      log("bridge", "close", { session: this.sessionName });
       // Send DETACH to the pty server
       try {
         this.socket.write(encodeDetach());

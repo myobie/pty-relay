@@ -23,6 +23,7 @@ import {
   type MintReady,
   type MintRequest,
 } from "../server/mint-protocol.ts";
+import { log, now, sinceMs } from "../../log.ts";
 
 /**
  * `pty-relay client join <preauth-url>` — claim a one-time preauth to
@@ -95,8 +96,13 @@ export async function runJoin(
   input: JoinInput,
   deps: JoinDeps
 ): Promise<JoinResult> {
+  const runStart = now();
   await ready();
-  const log = deps.log ?? (() => {});
+  const opLog = deps.log ?? (() => {});
+  log("cli", "client join begin", {
+    relayUrl: new URL(input.preauthUrl).origin,
+    label: input.label,
+  });
 
   const parsed = parseToken(input.preauthUrl);
   // Relay origin = scheme://host (no path, no fragment).
@@ -110,8 +116,8 @@ export async function runJoin(
   );
 
   const nonce = await newMintNonce();
-  const now = deps.now?.() ?? Math.floor(Date.now() / 1000);
-  const exp = now + (input.expTtlSeconds ?? 300);
+  const nowSec = deps.now?.() ?? Math.floor(Date.now() / 1000);
+  const exp = nowSec + (input.expTtlSeconds ?? 300);
 
   // Preauth claims always produce role=client now — the relay rejects
   // role=daemon on /api/keys/mint. New daemons on an existing account
@@ -125,7 +131,7 @@ export async function runJoin(
     exp,
   };
 
-  log(`Opening enrollment channel to ${relayUrl}...`);
+  opLog(`Opening enrollment channel to ${relayUrl}...`);
   const ready_ = await pairAndExchange(
     input.preauthUrl,
     input.totpCode,
@@ -135,7 +141,8 @@ export async function runJoin(
     deps
   );
 
-  log("Received minter signature. Claiming preauth...");
+  opLog("Received minter signature. Claiming preauth...");
+  log("cli", "client join: minter signed, claiming", { ms: sinceMs(runStart) });
   const enrollRes = await deps.api.post<JoinResponse>(
     "/api/keys/mint",
     buildMintBody(request, ready_)
@@ -158,6 +165,11 @@ export async function runJoin(
     },
   };
 
+  log("cli", "client join done", {
+    accountId: ready_.account_id,
+    pinnedDaemon: enrollRes.pinned_daemon_label,
+    ms: sinceMs(runStart),
+  });
   return {
     key,
     role: "client",

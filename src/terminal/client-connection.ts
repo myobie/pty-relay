@@ -4,6 +4,7 @@ import {
   Transport,
   type Pattern,
 } from "../crypto/index.ts";
+import { log, now, sinceMs, redactAuthQuery } from "../log.ts";
 
 const PING_INTERVAL_MS = 15000;
 const SLEEP_DRIFT_MS = 10000; // if timer fires >10s late, system was asleep
@@ -66,6 +67,11 @@ export class ClientRelayConnection {
     this.state = "connecting";
     this.transport = null;
     this.handshake = null;
+    const t0 = now();
+    log("ws-pair", "connect", {
+      url: redactAuthQuery(this.wsUrl),
+      pattern: this.noise?.pattern?.name,
+    });
 
     this.ws = new WebSocket(this.wsUrl);
     this.ws.binaryType = "nodebuffer";
@@ -73,6 +79,7 @@ export class ClientRelayConnection {
     this.ws.on("open", () => {
       this.state = "waiting";
       this.lastPong = Date.now();
+      log("ws-pair", "open", { ms: sinceMs(t0) });
       this.schedulePing();
     });
 
@@ -91,6 +98,7 @@ export class ClientRelayConnection {
     });
 
     this.ws.on("close", () => {
+      log("ws-pair", "close", { priorState: this.state });
       this.state = "closed";
       this.clearPing();
       this.clearPongTimer();
@@ -98,6 +106,7 @@ export class ClientRelayConnection {
     });
 
     this.ws.on("error", (err: Error) => {
+      log("ws-pair", "error", { message: err.message });
       this.events.onError(err);
     });
   }
@@ -128,6 +137,7 @@ export class ClientRelayConnection {
       // the system was asleep and the connection is certainly dead.
       const drift = Date.now() - this.nextPingExpectedAt;
       if (drift > SLEEP_DRIFT_MS) {
+        log("ws-pair", "sleep-wake detected, terminating", { driftMs: drift });
         if (this.ws) this.ws.terminate();
         return;
       }
@@ -146,6 +156,7 @@ export class ClientRelayConnection {
     this.clearPongTimer();
     this.pongTimer = setTimeout(() => {
       if (this.state === "closed") return;
+      log("ws-pair", "pong timeout, terminating");
       // No pong received in time — terminate immediately
       if (this.ws) {
         this.ws.terminate();
@@ -174,6 +185,7 @@ export class ClientRelayConnection {
   private handleTextMessage(text: string): void {
     try {
       const msg = JSON.parse(text);
+      log("ws-pair", "text frame", { type: msg.type });
 
       switch (msg.type) {
         case "paired":
@@ -210,9 +222,13 @@ export class ClientRelayConnection {
         this.transport = new Transport(result);
         this.state = "ready";
         this.handshake = null;
+        log("ws-pair", "handshake complete");
 
         this.events.onReady(this.transport);
       } catch (err) {
+        log("ws-pair", "handshake failed", {
+          message: err instanceof Error ? err.message : String(err),
+        });
         this.handshake = null;
         this.events.onError(
           err instanceof Error ? err : new Error(`Handshake failed: ${err}`)
@@ -224,6 +240,9 @@ export class ClientRelayConnection {
         const plaintext = this.transport.decrypt(new Uint8Array(data));
         this.events.onEncryptedMessage(plaintext);
       } catch (err) {
+        log("ws-pair", "decrypt failed", {
+          message: err instanceof Error ? err.message : String(err),
+        });
         // Decryption failure is fatal — nonce counters are now desynchronized
         this.events.onError(
           err instanceof Error ? err : new Error(String(err))

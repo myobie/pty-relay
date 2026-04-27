@@ -8,9 +8,11 @@ import {
   Transport,
 } from "../crypto/index.ts";
 import WebSocket from "ws";
+import { log } from "../log.ts";
 
 export async function list(tokenUrl: string): Promise<void> {
   await ready();
+  log("cli", "list (one-shot token) begin");
 
   const parsed = parseToken(tokenUrl);
   const secretHash = computeSecretHash(parsed.secret);

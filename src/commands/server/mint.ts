@@ -1,5 +1,6 @@
 import sodium from "libsodium-wrappers-sumo";
 import { ready } from "../../crypto/index.ts";
+import { log, now, sinceMs } from "../../log.ts";
 import { openSecretStore } from "../../storage/bootstrap.ts";
 import { loadPublicAccount, requireDaemonKey } from "../../storage/public-account.ts";
 import { PublicApi, PublicApiError } from "../../relay/public-api.ts";
@@ -57,7 +58,9 @@ export async function runMint(
   input: MintInput,
   api: PublicApi
 ): Promise<MintOutput> {
+  const start = now();
   await ready();
+  log("cli", "mint begin", { relayUrl: account.relayUrl, ttlSeconds: input.ttlSeconds ?? 300 });
 
   const secret = sodium.from_base64(
     account.signingKeys.secret,
@@ -90,6 +93,7 @@ export async function runMint(
     Math.floor((expiresAt.getTime() - Date.now()) / 1000)
   );
 
+  log("cli", "mint done", { preauthId: mint.id, ttlSeconds, ms: sinceMs(start) });
   return { url, ttlSeconds, expiresAt: mint.expires_at, mint };
 }
 

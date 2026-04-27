@@ -7,6 +7,7 @@ import {
 import { loadPublicAccount } from "../storage/public-account.ts";
 import type { SecretStore } from "../storage/secret-store.ts";
 import type { PublicTarget } from "./relay-client.ts";
+import { log } from "../log.ts";
 
 /**
  * A resolved host — either self-hosted (has a token URL) or public-relay
@@ -35,15 +36,23 @@ export async function resolveHost(
   const hosts = await loadKnownHosts(store);
   const host = hosts.find((h) => h.label === label);
   if (!host) {
+    log("hosts", "resolve miss", { label, known: hosts.length });
     throw new Error(
       `No known host "${label}". Run \`pty-relay ls\` to list hosts.`
     );
   }
 
   if (!isPublicHost(host)) {
+    log("hosts", "resolved self-hosted", { label });
     // Self-hosted: url must be set by loadKnownHosts's parser.
     return { kind: "self", label, url: (host as KnownHost).url! };
   }
+
+  log("hosts", "resolving public", {
+    label,
+    relayUrl: host.relayUrl,
+    role: host.role,
+  });
 
   // Public-relay: we need the caller's own Ed25519 keys to sign the
   // client_pair connection. Those live in `public_account`.

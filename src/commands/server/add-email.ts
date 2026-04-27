@@ -1,6 +1,7 @@
 import sodium from "libsodium-wrappers-sumo";
 import { ready } from "../../crypto/index.ts";
 import { openSecretStore } from "../../storage/bootstrap.ts";
+import { log } from "../../log.ts";
 import { loadPublicAccount, requireDaemonKey } from "../../storage/public-account.ts";
 import { PublicApi, PublicApiError } from "../../relay/public-api.ts";
 
@@ -15,6 +16,7 @@ export async function addEmailCommand(opts: {
   passphraseFile?: string;
 }): Promise<void> {
   await ready();
+  log("cli", "server add-email begin", { email: opts.email });
   const { store } = await openSecretStore(opts.configDir, {
     interactive: true,
     passphraseFile: opts.passphraseFile,

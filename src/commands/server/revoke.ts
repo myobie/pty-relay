@@ -1,6 +1,7 @@
 import sodium from "libsodium-wrappers-sumo";
 import { ready } from "../../crypto/index.ts";
 import { openSecretStore } from "../../storage/bootstrap.ts";
+import { log } from "../../log.ts";
 import { loadPublicAccount, requireDaemonKey } from "../../storage/public-account.ts";
 import { PublicApi, PublicApiError } from "../../relay/public-api.ts";
 import {
@@ -45,6 +46,11 @@ export async function revokeCommand(opts: {
   passphraseFile?: string;
 }): Promise<void> {
   await ready();
+  log("cli", "server revoke begin", {
+    target: opts.keyOrLabel,
+    force: !!opts.force,
+    yes: !!opts.yes,
+  });
 
   const { store } = await openSecretStore(opts.configDir, {
     interactive: true,

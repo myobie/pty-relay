@@ -12,6 +12,7 @@ import { execFileSync } from "node:child_process";
 import * as os from "node:os";
 import * as path from "node:path";
 import * as fs from "node:fs";
+import { log as vlog } from "../log.ts";
 
 /**
  * Shared pty-session vocabulary for both the self-hosted and public-mode
@@ -78,6 +79,11 @@ export function handleSessionControlMessage(
   };
   const replyError = (message: string) => reply({ type: "error", message });
   const type = msg.type;
+  vlog("serve", "control message", {
+    clientId,
+    type: typeof type === "string" ? type : typeof type,
+    session: typeof msg.session === "string" ? msg.session : undefined,
+  });
 
   if (type === "list") {
     if (cs.bridge?.isConnected()) cs.bridge.close();
@@ -387,6 +393,11 @@ export function handleSessionControlMessage(
 /** Teardown helper shared by both daemons. Closes the bridge, stops the
  *  events follower, and clears the heartbeat. Safe to call twice. */
 export function teardownSharedClient(cs: SharedClientSession): void {
+  vlog("serve", "teardown shared client", {
+    hadBridge: !!cs.bridge,
+    hadEventsFollower: !!cs.eventsFollower,
+    hadHeartbeat: !!cs.eventsHeartbeat,
+  });
   if (cs.bridge) {
     cs.bridge.close();
     cs.bridge = null;

@@ -5,6 +5,7 @@ import {
 } from "../relay/relay-client.ts";
 import { resolveHost } from "../relay/host-resolve.ts";
 import { openSecretStore } from "../storage/bootstrap.ts";
+import { log } from "../log.ts";
 
 export async function peek(
   hostLabel: string,
@@ -19,6 +20,14 @@ export async function peek(
   } = {}
 ): Promise<void> {
   await ready();
+  log("cli", "peek begin", {
+    hostLabel,
+    session,
+    plain: !!opts.plain,
+    full: !!opts.full,
+    wait: opts.wait,
+    timeoutSec: opts.timeoutSec,
+  });
 
   const { store } = await openSecretStore(opts.configDir, {
     interactive: true,

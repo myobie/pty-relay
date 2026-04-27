@@ -1,5 +1,6 @@
 import sodium from "libsodium-wrappers-sumo";
 import { createHash, randomUUID } from "node:crypto";
+import { log } from "../log.ts";
 
 /**
  * v2 canonical signed payloads for relay HTTP + WebSocket auth.
@@ -121,6 +122,11 @@ export function createAuthParams(
 ): { public_key: string; payload: string; sig: string } {
   const payload = buildV2Payload(binding);
   const sig = signPayload(payload, signSecretKey);
+  log("sign", "createAuthParams", {
+    method: binding.method,
+    path: binding.path,
+    ts: binding.ts ?? Math.floor(Date.now() / 1000),
+  });
 
   return {
     public_key: sodium.to_base64(

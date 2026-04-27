@@ -3,6 +3,7 @@ import {
   canonicalQuery,
   sha256Hex,
 } from "../crypto/signing.ts";
+import { log, now, sinceMs, redactAuthQuery } from "../log.ts";
 
 /**
  * Typed HTTP client for the Elixir public relay (`relay.pty.computer`,
@@ -169,7 +170,7 @@ export class PublicApi {
     let lastErr: Error | null = null;
     for (let attempt = 0; attempt < maxAttempts; attempt++) {
       try {
-        return await this.requestOnce<T>(method, url, body, timeoutMs);
+        return await this.requestOnce<T>(method, url, body, timeoutMs, attempt);
       } catch (err: any) {
         if (err instanceof PublicApiError) {
           // Timeouts surface as PublicApiError(status=0, timedOut=true).
@@ -186,6 +187,11 @@ export class PublicApi {
         lastErr = err;
         if (attempt < maxAttempts - 1) {
           const backoff = 200 * Math.pow(2, attempt); // 200, 400, 800 ms
+          log("http", "retry backoff", {
+            attempt,
+            backoffMs: backoff,
+            lastError: err?.message ?? String(err),
+          });
           await new Promise((r) => setTimeout(r, backoff));
         }
       }
@@ -197,8 +203,18 @@ export class PublicApi {
     method: "GET" | "POST",
     url: string,
     body: string | null,
-    timeoutMs: number
+    timeoutMs: number,
+    attempt: number
   ): Promise<T> {
+    const start = now();
+    const safeUrl = redactAuthQuery(url);
+    log("http", `${method} start`, {
+      url: safeUrl,
+      attempt,
+      bodyBytes: body?.length,
+      timeoutMs,
+    });
+
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
     let res: Response;
@@ -213,6 +229,7 @@ export class PublicApi {
       });
     } catch (err: any) {
       if (err?.name === "AbortError") {
+        log("http", `${method} timeout`, { url: safeUrl, attempt, ms: sinceMs(start) });
         throw new PublicApiError(
           0,
           `${method} ${url} timed out after ${timeoutMs}ms`,
@@ -220,12 +237,25 @@ export class PublicApi {
           true
         );
       }
+      log("http", `${method} transport error`, {
+        url: safeUrl,
+        attempt,
+        ms: sinceMs(start),
+        error: err?.message ?? String(err),
+      });
       throw new PublicApiError(0, `${method} ${url}: ${err?.message ?? err}`, null);
     } finally {
       clearTimeout(timer);
     }
 
     const parsed = await safeJson(res);
+    log("http", `${method} done`, {
+      url: safeUrl,
+      attempt,
+      status: res.status,
+      ok: res.ok,
+      ms: sinceMs(start),
+    });
     if (!res.ok) {
       throw new PublicApiError(
         res.status,

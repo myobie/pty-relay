@@ -17,6 +17,7 @@ import { buildPublicClientPairUrl } from "./public-server-url.ts";
 import type { EventRecord } from "@myobie/pty/client";
 import type { PublicTarget, RemoteSession } from "./relay-client.ts";
 import WebSocket from "ws";
+import { log, redactAuthQuery } from "../log.ts";
 
 export interface SubscribeRemoteEventsOptions {
   /** Called with the current running-session list right after each (re)connect.
@@ -91,6 +92,7 @@ export function subscribeRemoteEvents(
   const scheduleReconnect = () => {
     if (closed) return;
     if (attempts >= MAX_RECONNECT_ATTEMPTS) {
+      log("events", "gave up", { attempts });
       options.onGaveUp?.();
       closed = true;
       return;
@@ -101,6 +103,7 @@ export function subscribeRemoteEvents(
       INITIAL_BACKOFF_MS * Math.pow(BACKOFF_MULTIPLIER, attempts - 1),
       MAX_BACKOFF_MS
     );
+    log("events", "scheduling reconnect", { attempt: attempts, delayMs: delay });
     reconnectTimer = setTimeout(() => {
       reconnectTimer = null;
       connectOnce().catch((err) => {
@@ -123,6 +126,7 @@ export function subscribeRemoteEvents(
       undefined,
       parsed.clientToken ?? undefined
     );
+    log("events", "connect (self-hosted)", { url: redactAuthQuery(wsUrl) });
 
     const sock = new WebSocket(wsUrl);
     ws = sock;
@@ -222,6 +226,7 @@ export function subscribeRemoteEvents(
     };
 
     sock.onclose = () => {
+      log("events", "close (self-hosted)");
       clearIdleTimer();
       ws = null;
       if (closed) return;
@@ -282,6 +287,7 @@ export function subscribePublicRemoteEvents(
   const scheduleReconnect = () => {
     if (closed) return;
     if (attempts >= MAX_RECONNECT_ATTEMPTS) {
+      log("events", "gave up", { attempts });
       options.onGaveUp?.();
       closed = true;
       return;
@@ -292,6 +298,7 @@ export function subscribePublicRemoteEvents(
       INITIAL_BACKOFF_MS * Math.pow(BACKOFF_MULTIPLIER, attempts - 1),
       MAX_BACKOFF_MS
     );
+    log("events", "scheduling reconnect", { attempt: attempts, delayMs: delay });
     reconnectTimer = setTimeout(() => {
       reconnectTimer = null;
       connectOnce().catch((err) => {
@@ -310,6 +317,10 @@ export function subscribePublicRemoteEvents(
       target.accountKeys,
       target.targetPublicKeyB64
     );
+    log("events", "connect (public)", {
+      url: redactAuthQuery(wsUrl),
+      target: target.targetPublicKeyB64,
+    });
     const targetEdBytes = sodium.from_base64(
       target.targetPublicKeyB64,
       sodium.base64_variants.URLSAFE_NO_PADDING
@@ -407,6 +418,7 @@ export function subscribePublicRemoteEvents(
     };
 
     sock.onclose = () => {
+      log("events", "close (public)");
       clearIdleTimer();
       ws = null;
       if (closed) return;

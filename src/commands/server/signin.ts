@@ -15,6 +15,7 @@ import {
   generateConsecutiveCodes,
   otpauthUrl,
 } from "../../crypto/totp.ts";
+import { log } from "../../log.ts";
 
 /**
  * Dependencies that make the signin wizard testable without real HTTP,
@@ -93,6 +94,7 @@ export async function runSignin(
   deps: SigninDeps
 ): Promise<SigninResult> {
   await ready();
+  log("cli", "server signin begin", { email: input.email, relayUrl: input.relayUrl, label: input.label });
 
   const keypair =
     deps.generateSigningKeypair?.() ?? defaultSigningKeypair();
@@ -140,6 +142,7 @@ export async function runSignin(
    *  the same email); otherwise the device doesn't own a TOTP secret. */
   let finalTotpB32: string | undefined;
 
+  log("cli", "server signin verify", { branch: verify.status });
   if (verify.status === "totp_setup") {
     freshTotp = true;
     // The relay echoes back the secret it stored. Normally that's

@@ -8,6 +8,7 @@ import {
 } from "./secret-store.ts";
 import { deriveKey, type KdfProfile, zeroize } from "../crypto/aead.ts";
 import { encode, decode, b64encode } from "../crypto/envelope.ts";
+import { log, now, sinceMs } from "../log.ts";
 
 /**
  * File-backed SecretStore that encrypts each secret with a key derived from a
@@ -46,8 +47,10 @@ export class PassphraseStore implements SecretStore {
     salt: Uint8Array,
     profile: KdfProfile
   ): Promise<PassphraseStore> {
+    const start = now();
     await sodium.ready;
     const key = deriveKey(passphrase, salt, profile);
+    log("store", "passphrase deriveKey", { profile, ms: sinceMs(start) });
     return new PassphraseStore(configDir, salt, profile, key);
   }
 
@@ -57,19 +60,26 @@ export class PassphraseStore implements SecretStore {
   }
 
   async load(name: SecretName): Promise<Uint8Array | null> {
+    const start = now();
     const p = this.filePath(name);
     let json: string;
     try {
       json = fs.readFileSync(p, "utf-8");
     } catch (err: any) {
-      if (err?.code === "ENOENT") return null;
+      if (err?.code === "ENOENT") {
+        log("store", `passphrase load ${name}`, { found: false, ms: sinceMs(start) });
+        return null;
+      }
       throw err;
     }
 
-    return await decode(json, () => this.key);
+    const bytes = await decode(json, () => this.key);
+    log("store", `passphrase load ${name}`, { bytes: bytes.length, ms: sinceMs(start) });
+    return bytes;
   }
 
   async save(name: SecretName, plaintext: Uint8Array): Promise<void> {
+    const start = now();
     fs.mkdirSync(this.configDir, { recursive: true, mode: 0o700 });
 
     const json = encode(plaintext, this.key, {
@@ -89,16 +99,22 @@ export class PassphraseStore implements SecretStore {
       } catch {}
       throw err;
     }
+    log("store", `passphrase save ${name}`, { bytes: plaintext.length, ms: sinceMs(start) });
   }
 
   async delete(name: SecretName): Promise<void> {
+    const start = now();
     const p = this.filePath(name);
     try {
       fs.unlinkSync(p);
     } catch (err: any) {
-      if (err?.code === "ENOENT") return;
+      if (err?.code === "ENOENT") {
+        log("store", `passphrase delete ${name}`, { found: false, ms: sinceMs(start) });
+        return;
+      }
       throw err;
     }
+    log("store", `passphrase delete ${name}`, { ms: sinceMs(start) });
   }
 
   /**

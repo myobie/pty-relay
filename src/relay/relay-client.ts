@@ -18,6 +18,7 @@ import {
 } from "../crypto/key-conversion.ts";
 import { buildPublicClientPairUrl } from "./public-server-url.ts";
 import { formatUpgradeRejection } from "./relay-connection.ts";
+import { log, now, sinceMs, redactAuthQuery } from "../log.ts";
 
 export interface RemoteSession {
   name: string;
@@ -150,9 +151,11 @@ export async function sendPublicRemoteCommand<TResponse = unknown>(
       const retry = isTransport || isRetriable5xx;
       lastErr = err;
       if (!retry || attempt === maxAttempts - 1) {
+        log("ws-oneshot", "give up", { attempt, reason: message });
         throw err;
       }
       const backoff = 250 * Math.pow(2, attempt); // 250, 500, 1000 ms
+      log("ws-oneshot", "retry backoff", { attempt, backoffMs: backoff, reason: message });
       await new Promise((r) => setTimeout(r, backoff));
     }
   }
@@ -176,6 +179,14 @@ function sendOverTunnel<TResponse>(
   timeoutMs: number
 ): Promise<TResponse> {
   return new Promise<TResponse>((resolve, reject) => {
+    const start = now();
+    const safeUrl = redactAuthQuery(wsUrl);
+    log("ws-oneshot", "connect", {
+      url: safeUrl,
+      pattern: noise.pattern.name ?? "?",
+      requestType: request.type,
+      timeoutMs,
+    });
     const ws = new WebSocket(wsUrl);
     ws.binaryType = "nodebuffer";
 
@@ -212,14 +223,14 @@ function sendOverTunnel<TResponse>(
       res.on("error", finish);
     });
 
-    ws.onopen = () => {};
+    ws.onopen = () => {
+      log("ws-oneshot", "open", { ms: sinceMs(start) });
+    };
 
     ws.onmessage = (event) => {
       if (typeof event.data === "string") {
         const msg = JSON.parse(event.data);
-        if (process.env.PTY_RELAY_DEBUG) {
-          console.error(`[ws] text: ${JSON.stringify(msg)}`);
-        }
+        log("ws-oneshot", "text recv", { type: msg.type, ms: sinceMs(start) });
         if (msg.type === "paired") {
           handshake = new Handshake({
             pattern: noise.pattern,
@@ -228,9 +239,7 @@ function sendOverTunnel<TResponse>(
             staticKeys: noise.staticKeys,
           });
           const hello = handshake.writeMessage();
-          if (process.env.PTY_RELAY_DEBUG) {
-            console.error(`[ws] sending hello, ${hello.length} bytes`);
-          }
+          log("ws-oneshot", "noise hello", { bytes: hello.length });
           ws.send(hello);
         } else if (msg.type === "waiting_for_approval") {
           clearTimeout(timer);
@@ -252,16 +261,14 @@ function sendOverTunnel<TResponse>(
         const data = Buffer.isBuffer(event.data)
           ? event.data
           : Buffer.from(event.data as ArrayBuffer);
-        if (process.env.PTY_RELAY_DEBUG) {
-          console.error(`[ws] binary: ${data.length} bytes`);
-        }
 
         if (!transport && handshake) {
+          log("ws-oneshot", "noise welcome recv", { bytes: data.length });
           try {
             handshake.readMessage(new Uint8Array(data));
             transport = new Transport(handshake.split());
             handshake = null;
-            if (process.env.PTY_RELAY_DEBUG) console.error(`[ws] handshake complete`);
+            log("ws-oneshot", "noise complete", { ms: sinceMs(start) });
           } catch (err: any) {
             clearTimeout(timer);
             ws.close();
@@ -272,9 +279,11 @@ function sendOverTunnel<TResponse>(
           // Send the request now that the transport is open.
           const payload = JSON.stringify(request);
           const ct = transport.encrypt(new TextEncoder().encode(payload));
-          if (process.env.PTY_RELAY_DEBUG) {
-            console.error(`[ws] sending encrypted request ${request.type}, ${ct.length} bytes`);
-          }
+          log("ws-oneshot", "encrypted request sent", {
+            requestType: request.type,
+            bytes: ct.length,
+            ms: sinceMs(start),
+          });
           ws.send(ct);
         } else if (transport) {
           // decrypt throws on AEAD failure (corrupt/replayed frame,
@@ -291,6 +300,11 @@ function sendOverTunnel<TResponse>(
           }
           try {
             const msg = JSON.parse(new TextDecoder().decode(plaintext));
+            log("ws-oneshot", "encrypted response recv", {
+              type: msg.type,
+              bytes: data.length,
+              ms: sinceMs(start),
+            });
             // "approved" is an unsolicited post-handshake notification the
             // self-hosted daemon sends when the client was authenticated
             // via a token. It's informational and must NOT end the request.
@@ -306,6 +320,7 @@ function sendOverTunnel<TResponse>(
               return;
             }
             clearTimeout(timer);
+            log("ws-oneshot", "resolve + close", { ms: sinceMs(start) });
             ws.close();
             resolve(msg as TResponse);
           } catch {
@@ -325,6 +340,7 @@ function sendOverTunnel<TResponse>(
         (err as any)?.code ||
         (err as any)?.type ||
         "(no detail)";
+      log("ws-oneshot", "error", { detail, ms: sinceMs(start) });
       reject(new Error(`Connection failed: ${detail}`));
     };
 
@@ -332,6 +348,13 @@ function sendOverTunnel<TResponse>(
     // the handshake completes with a non-1000 code, surface that. Doesn't
     // fire on normal success (the timer resolve path tears down first).
     ws.onclose = (ev: any) => {
+      log("ws-oneshot", "close", {
+        code: ev?.code,
+        reason: ev?.reason,
+        hadTransport: !!transport,
+        hadHandshake: !!handshake,
+        ms: sinceMs(start),
+      });
       if (!transport && !handshake) {
         // Never got past the WebSocket upgrade OR never heard "paired".
         clearTimeout(timer);

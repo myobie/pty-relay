@@ -1,5 +1,6 @@
 import { ready } from "../../crypto/index.ts";
 import { openSecretStore } from "../../storage/bootstrap.ts";
+import { log } from "../../log.ts";
 import {
   loadPublicAccount,
   type KeyIdentity,
@@ -12,6 +13,7 @@ export async function statusCommand(opts: {
   passphraseFile?: string;
 }): Promise<void> {
   await ready();
+  log("cli", "server status begin", { json: !!opts.json });
   const { store } = await openSecretStore(opts.configDir, {
     interactive: true,
     passphraseFile: opts.passphraseFile,

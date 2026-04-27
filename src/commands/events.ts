@@ -8,6 +8,7 @@ import {
 } from "../relay/events-client.ts";
 import { resolveHost } from "../relay/host-resolve.ts";
 import { openSecretStore } from "../storage/bootstrap.ts";
+import { log } from "../log.ts";
 
 // NOTE: `--recent` (one-shot historical events for a session) is deliberately
 // not implemented yet — it needs its own server handler to read from the
@@ -32,6 +33,11 @@ interface EventsOpts {
  */
 export async function follow(hostLabel: string, opts: EventsOpts): Promise<void> {
   await ready();
+  log("cli", "events follow begin", {
+    hostLabel,
+    session: opts.session,
+    json: !!opts.json,
+  });
 
   const { store } = await openSecretStore(opts.configDir, {
     interactive: true,
@@ -77,12 +83,15 @@ export async function follow(hostLabel: string, opts: EventsOpts): Promise<void>
       }
     },
     onError: (err) => {
+      log("events", "stream error", { message: err.message });
       process.stderr.write(`[events] error: ${err.message}\n`);
     },
     onReconnecting: (attempt) => {
+      log("events", "reconnecting", { attempt });
       process.stderr.write(`[events] reconnecting (attempt ${attempt})…\n`);
     },
     onGaveUp: () => {
+      log("events", "gave up reconnecting");
       process.stderr.write(`[events] gave up reconnecting\n`);
       process.exit(1);
     },

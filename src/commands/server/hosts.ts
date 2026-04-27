@@ -1,6 +1,7 @@
 import sodium from "libsodium-wrappers-sumo";
 import { ready } from "../../crypto/index.ts";
 import { openSecretStore } from "../../storage/bootstrap.ts";
+import { log, now, sinceMs } from "../../log.ts";
 import { loadPublicAccount } from "../../storage/public-account.ts";
 import { PublicApi, PublicApiError } from "../../relay/public-api.ts";
 import {
@@ -44,6 +45,8 @@ export async function mergeAccountDaemons(
   accountSigningKeys: { public: Uint8Array; secret: Uint8Array },
   store: import("../../storage/secret-store.ts").SecretStore
 ): Promise<{ res: HostsResponse; added: number; pruned: number }> {
+  const start = now();
+  log("hosts", "merge begin", { relayUrl: accountRelayUrl });
   const res = await api.get<HostsResponse>("/api/hosts", {
     signWith: accountSigningKeys,
   });
@@ -96,6 +99,12 @@ export async function mergeAccountDaemons(
     added++;
   }
 
+  log("hosts", "merge done", {
+    added,
+    pruned: stale.length,
+    totalOnServer: res.hosts.length,
+    ms: sinceMs(start),
+  });
   return { res, added, pruned: stale.length };
 }
 
@@ -111,6 +120,7 @@ export async function hostsCommand(opts: {
   passphraseFile?: string;
 }): Promise<void> {
   await ready();
+  log("cli", "server hosts begin", { merge: !!opts.merge, json: !!opts.json });
   const { store } = await openSecretStore(opts.configDir, {
     interactive: true,
     passphraseFile: opts.passphraseFile,

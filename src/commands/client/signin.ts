@@ -9,6 +9,7 @@ import {
 } from "../../storage/public-account.ts";
 import { PublicApi, PublicApiError } from "../../relay/public-api.ts";
 import { mergeAccountDaemons } from "../server/hosts.ts";
+import { log } from "../../log.ts";
 
 /**
  * `pty-relay client signin --email <addr>` — register a role=client key
@@ -62,6 +63,7 @@ export async function runClientSignin(
   deps: ClientSigninDeps
 ): Promise<ClientSigninResult> {
   await ready();
+  log("cli", "client signin begin", { email: input.email, relayUrl: input.relayUrl, label: input.label });
 
   const keypair = deps.generateSigningKeypair?.() ?? defaultSigningKeypair();
   const publicKeyB64 = sodium.to_base64(

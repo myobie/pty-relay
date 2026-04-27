@@ -1,3 +1,5 @@
+import { log } from "../log.ts";
+
 export interface ClientMeta {
   client: string;  // "cli" | "web" | "ios" | "android"
   os: string;
@@ -20,9 +22,15 @@ export class ClientTracker {
       label: meta.label || "",
       connectedAt: new Date(),
     };
+    log("serve", "client hello", {
+      client: this.current.client,
+      os: this.current.os,
+      label: this.current.label,
+    });
   }
 
   clearClient(): void {
+    if (this.current) log("serve", "client tracker cleared");
     this.current = null;
   }
 

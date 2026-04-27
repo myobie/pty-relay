@@ -7,6 +7,7 @@ import {
 import type { Config } from "../crypto/index.ts";
 import type { SecretStore } from "../storage/secret-store.ts";
 import { openSecretStore, type BootstrapOpts } from "../storage/bootstrap.ts";
+import { log, now, sinceMs } from "../log.ts";
 
 export interface DaemonConfig {
   config: Config;
@@ -25,10 +26,16 @@ export async function loadDaemonConfig(
   bootstrapOpts?: BootstrapOpts
 ): Promise<DaemonConfig> {
   await ready();
+  const t0 = now();
 
   const { store, passphrase } = await openSecretStore(configDir, bootstrapOpts);
   const { config } = await setupConfig(store);
   const secretHash = computeSecretHash(config.secret);
+  log("account", "loaded daemon config", {
+    relay,
+    backend: store.backend,
+    ms: sinceMs(t0),
+  });
 
   return { config, relay, secretHash, store, passphrase };
 }

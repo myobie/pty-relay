@@ -7,6 +7,7 @@ import { KeychainStore } from "./keychain-store.ts";
 import { readPassphrase } from "./passphrase-prompt.ts";
 import { randomSalt, type KdfProfile } from "../crypto/aead.ts";
 import { b64encode, b64decode } from "../crypto/envelope.ts";
+import { log, now, sinceMs } from "../log.ts";
 
 import { getSessionDir } from "@myobie/pty/client";
 
@@ -109,15 +110,31 @@ export async function openSecretStore(
   configDir?: string,
   opts: BootstrapOpts = {}
 ): Promise<OpenedStore> {
+  const start = now();
   await sodium.ready;
 
   const dir = configDir ?? defaultConfigDir();
   const marker = readMarker(dir);
 
+  log("store", "openSecretStore", {
+    dir,
+    marker: marker ? marker.backend : "(none)",
+    interactive: !!opts.interactive,
+    passphraseFileProvided: !!opts.passphraseFile,
+  });
+
+  let result: OpenedStore;
   if (marker) {
-    return await openExisting(dir, marker, opts);
+    result = await openExisting(dir, marker, opts);
+  } else {
+    result = await createNew(dir, opts);
   }
-  return await createNew(dir, opts);
+  log("store", "openSecretStore ok", {
+    backend: result.store.backend,
+    created: result.created,
+    ms: sinceMs(start),
+  });
+  return result;
 }
 
 async function openExisting(

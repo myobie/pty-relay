@@ -9,6 +9,7 @@ import {
 } from "./secret-store.ts";
 import { randomKey, zeroize } from "../crypto/aead.ts";
 import { encode, decode, b64encode, b64decode } from "../crypto/envelope.ts";
+import { log, now, sinceMs } from "../log.ts";
 
 const SERVICE = "pty-relay";
 const MASTER_ACCOUNT_SUFFIX = ":__master__";
@@ -146,18 +147,34 @@ export class KeychainStore implements SecretStore {
   }
 
   async load(name: SecretName): Promise<Uint8Array | null> {
+    const start = now();
     const marker = this.markerPath(name);
-    if (!fs.existsSync(marker)) return null;
+    if (!fs.existsSync(marker)) {
+      log("store", `keychain load ${name}`, { found: false, ms: sinceMs(start) });
+      return null;
+    }
 
     const entry = new this.keyring.Entry(SERVICE, this.account(name));
     const json = entry.getPassword();
-    if (!json) return null;
+    if (!json) {
+      log("store", `keychain load ${name}`, {
+        found: "marker-only",
+        ms: sinceMs(start),
+      });
+      return null;
+    }
 
     const key = await this.ensureMasterKey();
-    return await decode(json, () => key);
+    const bytes = await decode(json, () => key);
+    log("store", `keychain load ${name}`, {
+      bytes: bytes.length,
+      ms: sinceMs(start),
+    });
+    return bytes;
   }
 
   async save(name: SecretName, plaintext: Uint8Array): Promise<void> {
+    const start = now();
     fs.mkdirSync(this.configDir, { recursive: true, mode: 0o700 });
 
     const key = await this.ensureMasterKey();
@@ -186,9 +203,14 @@ export class KeychainStore implements SecretStore {
     const tmp = `${marker}.tmp.${process.pid}.${Date.now()}`;
     fs.writeFileSync(tmp, this.account(name), { mode: 0o600 });
     fs.renameSync(tmp, marker);
+    log("store", `keychain save ${name}`, {
+      bytes: plaintext.length,
+      ms: sinceMs(start),
+    });
   }
 
   async delete(name: SecretName): Promise<void> {
+    const start = now();
     try {
       const entry = new this.keyring.Entry(SERVICE, this.account(name));
       entry.deletePassword();
@@ -196,6 +218,7 @@ export class KeychainStore implements SecretStore {
     try {
       fs.unlinkSync(this.markerPath(name));
     } catch {}
+    log("store", `keychain delete ${name}`, { ms: sinceMs(start) });
   }
 
   /** Remove the master key from this process's memory. */

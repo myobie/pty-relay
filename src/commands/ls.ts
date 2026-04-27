@@ -9,6 +9,7 @@ import {
 import { loadPublicAccount } from "../storage/public-account.ts";
 import { openSecretStore } from "../storage/bootstrap.ts";
 import sodium from "libsodium-wrappers-sumo";
+import { log, now, sinceMs } from "../log.ts";
 
 interface HostResult {
   label: string;
@@ -31,7 +32,9 @@ export async function ls(
   json = false,
   opts?: { passphraseFile?: string; filterTags?: Record<string, string> }
 ): Promise<void> {
+  const cmdStart = now();
   await ready();
+  log("cli", "ls start", { configDir, json, filter: opts?.filterTags });
 
   const { store } = await openSecretStore(configDir, {
     interactive: true,
@@ -74,11 +77,20 @@ export async function ls(
         }
       : null;
 
+  log("cli", "ls fanout", {
+    totalHosts: hosts.length,
+    publicHosts: publicHosts.length,
+    selfHosted: hosts.length - publicHosts.length,
+    hasAccount: !!account,
+    hasClientKey: !!clientKey,
+  });
+
   // Fetch sessions from all hosts in parallel. Self-hosted uses the
   // #pk.secret token URL; public-relay uses a signed role=client_pair
   // connection against the same relay the operator is enrolled on.
   const results: HostResult[] = await Promise.all(
     hosts.map(async (h) => {
+      const hostStart = now();
       if (isPublicHost(h)) {
         const url = `${h.relayUrl}@${h.publicKey.slice(0, 8)}`;
         if (!account) {
@@ -120,6 +132,7 @@ export async function ls(
           const sessions = hasFilter
             ? result.sessions.filter((s) => matchesAllTags(s.tags, filterTags))
             : result.sessions;
+          log("cli", "ls host done", { label: h.label, kind: "public", sessions: sessions.length, ms: sinceMs(hostStart) });
           return {
             label: h.label,
             url,
@@ -128,6 +141,7 @@ export async function ls(
             error: null,
           };
         } catch (err: any) {
+          log("cli", "ls host error", { label: h.label, kind: "public", error: err?.message, ms: sinceMs(hostStart) });
           return {
             label: h.label,
             url,
@@ -143,12 +157,16 @@ export async function ls(
         const sessions = hasFilter
           ? result.sessions.filter((s) => matchesAllTags(s.tags, filterTags))
           : result.sessions;
+        log("cli", "ls host done", { label: h.label, kind: "self-hosted", sessions: sessions.length, ms: sinceMs(hostStart) });
         return { label: h.label, url, sessions, spawn_enabled: result.spawnEnabled, error: null };
       } catch (err: any) {
+        log("cli", "ls host error", { label: h.label, kind: "self-hosted", error: err?.message, ms: sinceMs(hostStart) });
         return { label: h.label, url, sessions: [], spawn_enabled: false, error: err.message || "connection failed" };
       }
     })
   );
+
+  log("cli", "ls fanout complete", { hosts: results.length, ms: sinceMs(cmdStart) });
 
   if (json) {
     console.log(JSON.stringify(results, null, 2));

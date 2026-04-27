@@ -5,6 +5,7 @@ import {
 } from "../relay/relay-client.ts";
 import { resolveHost } from "../relay/host-resolve.ts";
 import { openSecretStore } from "../storage/bootstrap.ts";
+import { log } from "../log.ts";
 
 export async function tag(
   hostLabel: string,
@@ -18,6 +19,13 @@ export async function tag(
   } = {}
 ): Promise<void> {
   await ready();
+  log("cli", "tag begin", {
+    hostLabel,
+    session,
+    setCount: opts.set ? Object.keys(opts.set).length : 0,
+    removeCount: opts.remove?.length ?? 0,
+    json: !!opts.json,
+  });
 
   const { store } = await openSecretStore(opts.configDir, {
     interactive: true,

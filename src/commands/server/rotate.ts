@@ -1,6 +1,7 @@
 import sodium from "libsodium-wrappers-sumo";
 import { ready } from "../../crypto/index.ts";
 import { openSecretStore } from "../../storage/bootstrap.ts";
+import { log } from "../../log.ts";
 import {
   loadPublicAccount,
   savePublicAccount,
@@ -125,6 +126,7 @@ export async function rotateCommand(opts: {
   passphraseFile?: string;
 }): Promise<void> {
   await ready();
+  log("cli", "server rotate begin", { role: opts.role, complete: !!opts.complete });
   const { store } = await openSecretStore(opts.configDir, {
     interactive: true,
     passphraseFile: opts.passphraseFile,

@@ -4,6 +4,7 @@ import { PairingRegistry } from "./pairing.ts";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { URL } from "node:url";
+import { log } from "../log.ts";
 
 /**
  * Self-hosted relay server. Same WebSocket protocol as the Elixir relay --
@@ -76,12 +77,22 @@ export function createRelayServer(port: number, htmlPath?: string) {
     const label = url.searchParams.get("label");
     const clientToken = url.searchParams.get("client_token");
 
+    log("pairing", "ws connection", {
+      role,
+      hasSecretHash: !!secretHash,
+      clientId,
+      hasClientToken: !!clientToken,
+      remote: req.socket.remoteAddress,
+    });
+
     if (!role || !secretHash || (role !== "daemon" && role !== "client")) {
+      log("pairing", "ws reject invalid params", { role });
       ws.close(4000, "invalid params");
       return;
     }
 
     if (secretHash.length !== 64) {
+      log("pairing", "ws reject bad secret_hash length", { len: secretHash.length });
       ws.close(4000, "invalid secret_hash");
       return;
     }
@@ -89,6 +100,7 @@ export function createRelayServer(port: number, htmlPath?: string) {
     if (role === "daemon" && clientId) {
       // Per-client daemon socket: pair with an existing waiting client
       const ok = registry.registerDaemonForClient(secretHash, clientId, ws);
+      log("pairing", "registerDaemonForClient", { clientId, ok });
       if (!ok) {
         ws.send(JSON.stringify({ type: "error", message: "client not found" }));
         ws.close();
@@ -96,6 +108,7 @@ export function createRelayServer(port: number, htmlPath?: string) {
     } else if (role === "daemon") {
       // Primary daemon control socket
       const ok = registry.registerDaemon(secretHash, ws, label);
+      log("pairing", "registerDaemon", { ok, label });
       if (!ok) {
         ws.send(JSON.stringify({ type: "error", message: "secret_hash already registered" }));
         ws.close();
@@ -123,6 +136,11 @@ export function createRelayServer(port: number, htmlPath?: string) {
         clientToken ?? undefined,
         { remoteAddr, userAgent, origin }
       );
+      log("pairing", "registerClient", {
+        assigned: id,
+        hasClientToken: !!clientToken,
+        remoteAddr,
+      });
       if (id === null) {
         ws.send(JSON.stringify({ type: "error", message: "no daemon available" }));
         ws.close();
@@ -134,12 +152,16 @@ export function createRelayServer(port: number, htmlPath?: string) {
     start(): Promise<void> {
       return new Promise((resolve, reject) => {
         httpServer.on("error", reject);
-        httpServer.listen(port, () => resolve());
+        httpServer.listen(port, () => {
+          log("pairing", "self-hosted http/ws listening", { port });
+          resolve();
+        });
       });
     },
 
     stop(): Promise<void> {
       return new Promise((resolve) => {
+        log("pairing", "self-hosted http/ws stopping", { port });
         wss.close();
         httpServer.close(() => resolve());
       });

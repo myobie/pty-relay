@@ -1,6 +1,7 @@
 import sodium from "libsodium-wrappers-sumo";
 import { ready } from "../../crypto/index.ts";
 import { openSecretStore } from "../../storage/bootstrap.ts";
+import { log } from "../../log.ts";
 import {
   loadPublicAccount,
   clearPublicAccount,
@@ -25,6 +26,7 @@ export async function deleteAccountCommand(opts: {
   passphraseFile?: string;
 }): Promise<void> {
   await ready();
+  log("cli", "server delete-account begin", { yes: !!opts.yes });
 
   const { store } = await openSecretStore(opts.configDir, {
     interactive: true,

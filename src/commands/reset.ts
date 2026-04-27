@@ -6,6 +6,7 @@ import {
   hasMarker,
 } from "../storage/bootstrap.ts";
 import { KeychainStore } from "../storage/keychain-store.ts";
+import { log } from "../log.ts";
 
 export interface ResetOpts {
   configDir?: string;
@@ -18,6 +19,7 @@ export interface ResetOpts {
  * Non-destructive of the process state; just nukes the on-disk files.
  */
 export async function resetCommand(opts: ResetOpts): Promise<void> {
+  log("cli", "reset begin", { force: !!opts.force });
   const dir = opts.configDir ?? defaultConfigDir();
 
   if (!fs.existsSync(dir)) {

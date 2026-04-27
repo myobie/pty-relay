@@ -1,6 +1,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import * as os from "node:os";
+import { log } from "../../log.ts";
 import { defaultConfigDir, openSecretStore } from "../../storage/bootstrap.ts";
 import { loadLabel } from "../../relay/config.ts";
 import { loadClients } from "../../relay/clients.ts";
@@ -29,6 +30,7 @@ export interface LocalStatusOpts {
 
 export async function localStatusCommand(opts: LocalStatusOpts): Promise<void> {
   await ready();
+  log("cli", "local status begin", { json: !!opts.json, showToken: !!opts.showToken });
 
   const dir = opts.configDir ?? defaultConfigDir();
   if (!fs.existsSync(dir)) {

@@ -8,6 +8,7 @@ import {
   type Pattern,
 } from "../crypto/index.ts";
 import type { Config } from "../crypto/index.ts";
+import { log, now, sinceMs, redactAuthQuery } from "../log.ts";
 
 /** Turn a rejected WS upgrade into a human-readable error string.
  *  Extracts the reason field from a JSON body when present; otherwise
@@ -116,11 +117,14 @@ export class RelayConnection {
 
     const url =
       typeof this.wsUrlFactory === "function" ? this.wsUrlFactory() : this.wsUrlFactory;
+    const connectStart = now();
+    log("ws-pair", "connect", { url: redactAuthQuery(url) });
     this.ws = new WebSocket(url);
     this.ws.binaryType = "nodebuffer";
 
     this.ws.on("open", () => {
       this.state = "waiting";
+      log("ws-pair", "open", { ms: sinceMs(connectStart) });
       this.events.onConnected?.();
     });
 
@@ -138,29 +142,28 @@ export class RelayConnection {
       // would otherwise log a second "disconnected" and re-teardown.
       if (this.state === "closed") return;
       this.state = "closed";
-      if (process.env.PTY_RELAY_DEBUG) {
-        console.error(
-          `[relay-conn] close code=${code} reason="${reason?.toString?.() ?? ""}"`
-        );
-      }
+      log("ws-pair", "close", {
+        code,
+        reason: reason?.toString?.() ?? "",
+        ms: sinceMs(connectStart),
+      });
       this.events.onClose(code);
     });
 
     this.ws.on("error", (err: Error) => {
-      if (process.env.PTY_RELAY_DEBUG) {
-        console.error(
-          `[relay-conn] ws error: ${err?.message ?? "(empty)"} type=${(err as any)?.type ?? "?"} code=${(err as any)?.code ?? "?"}`
-        );
-      }
+      log("ws-pair", "error", {
+        error: err?.message ?? "(empty)",
+        type: (err as any)?.type,
+        code: (err as any)?.code,
+      });
       this.events.onError(err);
     });
 
     this.ws.on("unexpected-response", (req, res) => {
-      if (process.env.PTY_RELAY_DEBUG) {
-        console.error(
-          `[relay-conn] unexpected-response status=${res.statusCode} headers=${JSON.stringify(res.headers)}`
-        );
-      }
+      log("ws-pair", "unexpected-response", {
+        status: res.statusCode,
+        ms: sinceMs(connectStart),
+      });
       // Registering an 'unexpected-response' listener suppresses ws's
       // default auto-close, so we have to tear the request down
       // ourselves. Without this, the socket lingers and onClose never
@@ -222,7 +225,11 @@ export class RelayConnection {
 
   private handleTextMessage(text: string): void {
     let msg: any;
-    try { msg = JSON.parse(text); } catch { return; }
+    try { msg = JSON.parse(text); } catch {
+      log("ws-pair", "text: unparseable", { preview: text.slice(0, 80) });
+      return;
+    }
+    log("ws-pair", "text recv", { type: msg.type });
 
     switch (msg.type) {
       case "paired": {
@@ -265,6 +272,7 @@ export class RelayConnection {
         // Relay will follow up with close code 4001. Surface the
         // revocation so callers can mark the key dead instead of
         // looping on reconnect.
+        log("ws-pair", "revoked frame — close imminent (code 4001)");
         this.events.onRevoked?.();
         break;
     }
@@ -304,6 +312,7 @@ export class RelayConnection {
       remoteStaticPublicKey,
     });
     this.state = "handshaking";
+    log("ws-pair", "handshake begin", { pattern: pattern.name });
   }
 
   private handleBinaryMessage(data: Buffer): void {
@@ -318,8 +327,12 @@ export class RelayConnection {
         this.state = "ready";
         this.handshake = null;
 
+        log("ws-pair", "handshake complete + welcome sent", {
+          welcomeBytes: welcome.length,
+        });
         this.events.onHandshakeComplete(this.transport);
       } catch (err) {
+        log("ws-pair", "handshake failed", { error: (err as any)?.message ?? String(err) });
         this.events.onError(
           err instanceof Error ? err : new Error(`Handshake failed: ${err}`)
         );
@@ -331,6 +344,7 @@ export class RelayConnection {
         this.events.onEncryptedMessage(plaintext);
       } catch (err) {
         // Decryption failure is fatal — nonce counters are now desynchronized
+        log("ws-pair", "decrypt failed", { error: (err as any)?.message ?? String(err) });
         this.events.onError(err instanceof Error ? err : new Error(String(err)));
         this.close();
       }

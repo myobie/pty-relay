@@ -7,6 +7,7 @@ import {
 } from "../../storage/bootstrap.ts";
 import { KeychainStore } from "../../storage/keychain-store.ts";
 import { secretFilename, type SecretName } from "../../storage/secret-store.ts";
+import { log } from "../../log.ts";
 
 /**
  * `pty-relay local reset` — wipe ONLY the self-hosted daemon's local
@@ -48,6 +49,7 @@ export interface LocalResetOpts {
 const SELF_HOSTED_SECRETS: SecretName[] = ["config", "clients", "auth"];
 
 export async function localResetCommand(opts: LocalResetOpts): Promise<void> {
+  log("cli", "local reset begin", { force: !!opts.force });
   const dir = opts.configDir ?? defaultConfigDir();
 
   if (!fs.existsSync(dir)) {

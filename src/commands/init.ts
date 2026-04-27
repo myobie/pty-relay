@@ -5,6 +5,7 @@ import {
   getMarkerPath,
   defaultConfigDir,
 } from "../storage/bootstrap.ts";
+import { log } from "../log.ts";
 
 export interface InitOpts {
   configDir?: string;
@@ -18,6 +19,7 @@ export interface InitOpts {
  */
 export async function initCommand(opts: InitOpts): Promise<void> {
   const dir = opts.configDir ?? defaultConfigDir();
+  log("cli", "init begin", { dir, force: !!opts.force, backendHint: opts.backend });
 
   if (hasMarker(dir)) {
     if (!opts.force) {

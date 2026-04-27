@@ -10,6 +10,7 @@ import {
 import type { Packet } from "@myobie/pty/protocol";
 import { TERMINAL_SANITIZE } from "@myobie/pty/client";
 import type { ClientRelayConnection } from "./client-connection.ts";
+import { log } from "../log.ts";
 
 const CTRL_BACKSLASH = 0x1c;
 // Kitty's CSI u encoding for Ctrl+\: ESC [ 92 ; 5 u
@@ -54,6 +55,12 @@ export class Terminal {
    * Send the attach request to the daemon and start bridging terminal I/O.
    */
   async start(cols: number, rows: number): Promise<void> {
+    log("terminal", "start", {
+      session: this.session,
+      cols,
+      rows,
+      skipAttach: this.skipAttach,
+    });
     if (!this.skipAttach) {
       // Send attach request (JSON, inside the encrypted tunnel)
       const attachMsg = JSON.stringify({
@@ -80,6 +87,7 @@ export class Terminal {
           // Daemon created the session — it will auto-attach, wait for "attached"
           return;
         } else if (msg.type === "attached") {
+          log("terminal", "attached", { session: this.session });
           this.attached = true;
           this.enterRawMode();
           return;
@@ -141,6 +149,10 @@ export class Terminal {
         const exitCode = packet.payload.length >= 4
           ? packet.payload.readInt32BE(0)
           : -1;
+        log("terminal", "session exit packet", {
+          session: this.session,
+          exitCode,
+        });
         this.cleanup();
         if (this.options.onExit) {
           this.options.onExit(exitCode);
@@ -232,6 +244,7 @@ export class Terminal {
   }
 
   private detach(): void {
+    log("terminal", "detach", { session: this.session });
     try {
       this.connection.send(encodeDetach());
     } catch {}

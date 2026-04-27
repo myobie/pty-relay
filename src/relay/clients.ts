@@ -3,6 +3,7 @@ import * as path from "node:path";
 import * as crypto from "node:crypto";
 import type { SecretStore } from "../storage/secret-store.ts";
 import { getSessionDir } from "@myobie/pty/client";
+import { log } from "../log.ts";
 
 export interface ClientToken {
   id: string;
@@ -86,9 +87,14 @@ export async function updateClients<T>(
   const prev = clientsMutationQueue.get(store) ?? Promise.resolve();
   let result: T;
   const work = prev.then(async () => {
-    const data = await loadClients(store);
-    result = await mutator(data);
-    await saveClients(data, store);
+    const before = await loadClients(store);
+    const beforeCount = before.tokens.length;
+    result = await mutator(before);
+    await saveClients(before, store);
+    log("store", "clients mutated", {
+      tokens: before.tokens.length,
+      delta: before.tokens.length - beforeCount,
+    });
   });
   // Swallow failures on the queue head so the next mutation can still run.
   // The original caller still sees the error via `await work` below.
@@ -188,6 +194,7 @@ export function signalDaemon(configDir?: string): boolean {
     process.kill(pid, 0);
     // Process exists, send SIGUSR1
     process.kill(pid, "SIGUSR1");
+    log("serve", "signaled daemon", { pid });
     return true;
   } catch {
     return false;

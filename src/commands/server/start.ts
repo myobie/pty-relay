@@ -3,6 +3,7 @@ import {
   ready,
   type Config,
 } from "../../crypto/index.ts";
+import { log } from "../../log.ts";
 import { openSecretStore } from "../../storage/bootstrap.ts";
 import { loadPublicAccount, requireDaemonKey } from "../../storage/public-account.ts";
 import {
@@ -62,6 +63,10 @@ export async function startCommand(
   options: StartOptions = {}
 ): Promise<void> {
   await ready();
+  log("cli", "server start begin", {
+    configDir,
+    allowNewSessions: !!options.allowNewSessions,
+  });
 
   const { store } = await openSecretStore(configDir, {
     interactive: true,
@@ -145,10 +150,12 @@ export async function startCommand(
     teardownSharedClient(cs);
     cs.connection.close();
     clients.delete(clientId);
+    log("bridge", "per-client torn down", { clientId, remaining: clients.size });
     console.log(`Client ${clientId} disconnected. (${clients.size} active)`);
   }
 
   function openClientConnection(clientId: string): void {
+    log("bridge", "per-client connect", { clientId });
     const tracker = new ClientTracker();
     const urlFactory = () =>
       buildPublicDaemonUrl(state.relayUrl, state.accountKeys, { clientId });

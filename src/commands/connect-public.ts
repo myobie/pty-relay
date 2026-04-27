@@ -16,6 +16,7 @@ import {
 import type { ConnectResult } from "./connect.ts";
 import { reconnectDelay } from "./connect.ts";
 import { spawnSync } from "node:child_process";
+import { log } from "../log.ts";
 
 /**
  * Public-relay variant of the `connect` flow. Mirrors the self-hosted
@@ -40,6 +41,7 @@ export async function connectPublic(
   } = {}
 ): Promise<void> {
   await ready();
+  log("cli", "connect-public begin", { hostLabel, session: options.session });
 
   const { store } = await openSecretStore(options.configDir, {
     interactive: true,
@@ -108,6 +110,15 @@ async function connectPublicWithReconnect(
   while (true) {
     const reason = await attemptConnectPublic(target, session, isReconnect);
 
+    log("bridge", "public attempt ended", {
+      session,
+      attempt,
+      isReconnect,
+      reason: reason.kind,
+      ...(reason.kind === "error" ? { message: reason.message } : {}),
+      ...(reason.kind === "lost" ? { wasAttached: reason.wasAttached } : {}),
+    });
+
     if (reason.kind === "detached") return;
     if (reason.kind === "exited") return;
     if (reason.kind === "error") {
@@ -119,10 +130,12 @@ async function connectPublicWithReconnect(
     // actually attached (so sleep/wake doesn't burn through the budget).
     if (reason.wasAttached) attempt = 0;
     if (attempt >= MAX_RECONNECT_ATTEMPTS) {
+      log("bridge", "public gave up reconnecting", { attempts: attempt });
       console.error(`\n[gave up reconnecting after ${attempt} attempts]`);
       return;
     }
     const delay = reconnectDelay(attempt);
+    log("bridge", "public scheduling reconnect", { attempt, delayMs: delay });
     console.error(
       `\n[disconnected — reconnecting in ${Math.round(delay / 1000)}s...]`
     );

@@ -1,5 +1,6 @@
 import sodium from "libsodium-wrappers-sumo";
 import type { SecretStore } from "./secret-store.ts";
+import { log } from "../log.ts";
 
 /**
  * Per-device state for a relay account.
@@ -167,11 +168,26 @@ export async function loadPublicAccount(
   store: SecretStore
 ): Promise<PublicAccount | null> {
   const bytes = await store.load("public_account");
-  if (!bytes) return null;
+  if (!bytes) {
+    log("account", "load", { present: false });
+    return null;
+  }
   try {
     const parsed = JSON.parse(new TextDecoder().decode(bytes));
-    return isPublicAccount(parsed) ? parsed : null;
-  } catch {
+    const valid = isPublicAccount(parsed) ? parsed : null;
+    log("account", "load", {
+      present: true,
+      valid: !!valid,
+      hasDaemonKey: !!parsed?.daemonKey,
+      hasClientKey: !!parsed?.clientKey,
+      hasTotp: !!parsed?.totpSecretB32,
+      accountId: parsed?.accountId,
+      label: parsed?.label,
+      pin: parsed?.clientKey?.pin?.daemonLabel,
+    });
+    return valid;
+  } catch (err: any) {
+    log("account", "load parse failed", { error: err?.message ?? String(err) });
     return null;
   }
 }
@@ -182,8 +198,16 @@ export async function savePublicAccount(
 ): Promise<void> {
   const bytes = new TextEncoder().encode(JSON.stringify(account));
   await store.save("public_account", bytes);
+  log("account", "save", {
+    accountId: account.accountId,
+    label: account.label,
+    hasDaemonKey: !!account.daemonKey,
+    hasClientKey: !!account.clientKey,
+    bytes: bytes.length,
+  });
 }
 
 export async function clearPublicAccount(store: SecretStore): Promise<void> {
   await store.delete("public_account");
+  log("account", "clear");
 }

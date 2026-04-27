@@ -7,6 +7,7 @@
  */
 
 import { createHmac, randomBytes } from "node:crypto";
+import { log } from "../log.ts";
 
 const TIME_STEP_SECONDS = 30;
 const DIGITS = 6;
@@ -79,6 +80,7 @@ function truncate(hmac: Buffer, digits: number): string {
 export function generateTotpCode(secretB32: string, atSec?: number): string {
   const now = atSec ?? Math.floor(Date.now() / 1000);
   const counter = Math.floor(now / TIME_STEP_SECONDS);
+  log("totp", "generate code", { counter, atSec: now });
 
   // 8-byte big-endian counter. JS bitshifts are 32-bit, so split high/low.
   const buf = Buffer.alloc(8);

@@ -1,5 +1,6 @@
 import sodium from "libsodium-wrappers-sumo";
 import type { SecretStore } from "../storage/secret-store.ts";
+import { log } from "../log.ts";
 
 export interface Config {
   publicKey: Uint8Array;      // Curve25519 DH public key (for Noise NK)
@@ -91,7 +92,11 @@ export async function setupConfig(
   const existingBytes = await store.load("config");
   if (existingBytes) {
     const existing = decodeConfig(existingBytes);
-    if (existing) return { config: existing, created: false };
+    if (existing) {
+      log("account", "daemon config loaded from store");
+      return { config: existing, created: false };
+    }
+    log("account", "daemon config present but undecodable; regenerating");
   }
 
   const { publicKey, secretKey } = generateKeypair();
@@ -106,5 +111,6 @@ export async function setupConfig(
   };
 
   await store.save("config", encodeConfig(config));
+  log("account", "daemon config generated and saved");
   return { config, created: true };
 }

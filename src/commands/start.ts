@@ -20,6 +20,7 @@ import {
 } from "../relay/clients.ts";
 import { sanitizeRemoteString } from "../sanitize.ts";
 import { handleSessionControlMessage } from "./start-shared.ts";
+import { log } from "../log.ts";
 
 const MAX_CLIENTS = 10;
 /** Cap on simultaneously-pending approvals. Without this, a scripted
@@ -65,6 +66,13 @@ export async function start(
     passphraseFile?: string;
   }
 ): Promise<void> {
+  log("cli", "local start begin", {
+    port,
+    configDir,
+    tailscale: !!options?.tailscale,
+    autoApprove: !!options?.autoApprove,
+    allowNewSessions: !!options?.allowNewSessions,
+  });
   const relay = `localhost:${port}`;
   const { config, secretHash, store } = await loadDaemonConfig(
     relay,

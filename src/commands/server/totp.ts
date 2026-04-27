@@ -1,6 +1,7 @@
 import { ready } from "../../crypto/index.ts";
 import { openSecretStore } from "../../storage/bootstrap.ts";
 import { loadPublicAccount } from "../../storage/public-account.ts";
+import { log } from "../../log.ts";
 import {
   generateTotpCode,
   otpauthUrl,
@@ -17,6 +18,7 @@ export async function totpCommand(opts: {
   passphraseFile?: string;
 }): Promise<void> {
   await ready();
+  log("cli", "server totp begin", { subcommand: opts.subcommand });
 
   const { store } = await openSecretStore(opts.configDir, {
     interactive: true,

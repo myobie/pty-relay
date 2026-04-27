@@ -1,4 +1,5 @@
 import WebSocket from "ws";
+import { log, now, sinceMs, redactAuthQuery } from "../log.ts";
 
 export interface RelayEvent {
   seq: number;
@@ -72,10 +73,13 @@ export class PrimaryRelayConnection {
         ? this.wsUrlFactory()
         : this.wsUrlFactory;
 
+    const connectStart = now();
+    log("ws-primary", "connect", { url: redactAuthQuery(url) });
     this.ws = new WebSocket(url);
     this.ws.binaryType = "nodebuffer";
 
     this.ws.on("open", () => {
+      log("ws-primary", "open", { ms: sinceMs(connectStart) });
       this.events.onConnected();
     });
 
@@ -84,16 +88,24 @@ export class PrimaryRelayConnection {
       if (!isBinary) {
         const text = typeof data === "string" ? data : data.toString("utf-8");
         this.handleTextMessage(text);
+      } else {
+        log("ws-primary", "unexpected binary frame", { bytes: Buffer.isBuffer(data) ? data.length : 0 });
       }
     });
 
     this.ws.on("close", (code: number) => {
+      log("ws-primary", "close", { code, ms: sinceMs(connectStart), closedByUs: this.closed });
       if (!this.closed) {
         this.events.onClose(code);
       }
     });
 
     this.ws.on("error", (err: Error) => {
+      log("ws-primary", "error", {
+        error: err?.message,
+        type: (err as any)?.type,
+        code: (err as any)?.code,
+      });
       this.events.onError(err);
     });
   }
@@ -101,6 +113,7 @@ export class PrimaryRelayConnection {
   /** Close the connection. */
   close(): void {
     this.closed = true;
+    log("ws-primary", "close requested");
     this.ws?.close();
     this.ws = null;
   }
@@ -109,6 +122,11 @@ export class PrimaryRelayConnection {
   sendText(text: string): void {
     if (this.ws && this.ws.readyState === WebSocket.OPEN) {
       this.ws.send(text);
+    } else {
+      log("ws-primary", "sendText dropped (not open)", {
+        readyState: this.ws?.readyState,
+        preview: text.slice(0, 80),
+      });
     }
   }
 
@@ -136,6 +154,7 @@ export class PrimaryRelayConnection {
   private handleTextMessage(text: string): void {
     try {
       const msg = JSON.parse(text);
+      log("ws-primary", "text recv", { type: msg.type, size: text.length });
 
       switch (msg.type) {
         case "client_waiting":

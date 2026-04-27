@@ -3,6 +3,7 @@ import * as path from "node:path";
 import * as os from "node:os";
 import { execFileSync } from "node:child_process";
 import { defaultConfigDir, getMarkerPath } from "../storage/bootstrap.ts";
+import { log } from "../log.ts";
 
 /**
  * `pty-relay doctor` — print diagnostic info to help debug setup issues.
@@ -12,6 +13,7 @@ import { defaultConfigDir, getMarkerPath } from "../storage/bootstrap.ts";
 export async function doctorCommand(opts: {
   configDir?: string;
 }): Promise<void> {
+  log("cli", "doctor begin");
   const lines: string[] = [];
   const configDir = opts.configDir ?? defaultConfigDir();
 

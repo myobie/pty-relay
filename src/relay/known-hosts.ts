@@ -1,4 +1,5 @@
 import type { SecretStore } from "../storage/secret-store.ts";
+import { log } from "../log.ts";
 
 /**
  * A saved relay host. Supports two flavors:
@@ -63,17 +64,32 @@ export async function loadKnownHosts(
 ): Promise<KnownHost[]> {
   try {
     const bytes = await store.load("hosts");
-    if (!bytes) return [];
+    if (!bytes) {
+      log("hosts", "load", { count: 0, source: "empty" });
+      return [];
+    }
     const parsed = JSON.parse(new TextDecoder().decode(bytes));
-    if (!Array.isArray(parsed)) return [];
+    if (!Array.isArray(parsed)) {
+      log("hosts", "load malformed", { parsed: typeof parsed });
+      return [];
+    }
 
     const result: KnownHost[] = [];
+    let skipped = 0;
     for (const item of parsed) {
       const host = parseHost(item);
       if (host) result.push(host);
+      else skipped++;
     }
+    log("hosts", "load", {
+      count: result.length,
+      skipped,
+      publicCount: result.filter((h) => !!h.relayUrl).length,
+      selfHostedCount: result.filter((h) => !!h.url).length,
+    });
     return result;
-  } catch {
+  } catch (err: any) {
+    log("hosts", "load failed", { error: err?.message ?? String(err) });
     return [];
   }
 }
@@ -139,6 +155,7 @@ export async function saveKnownHost(
   const finalLabel = pickUniqueLabel(label, url, usedLabels);
   kept.push({ label: finalLabel, url });
   await persist(kept, store);
+  log("hosts", "save self-hosted", { label: finalLabel, collidedWith: finalLabel !== label ? label : undefined });
 }
 
 /**
@@ -173,6 +190,13 @@ export async function savePublicKnownHost(
     role: host.role ?? "daemon",
   });
   await persist(kept, store);
+  log("hosts", "save public", {
+    label: finalLabel,
+    collidedWith: finalLabel !== host.label ? host.label : undefined,
+    relayUrl: host.relayUrl,
+    role: host.role ?? "daemon",
+    publicKeyPrefix: host.publicKey.slice(0, 8),
+  });
 }
 
 /** Remove all known hosts with the given label. */
@@ -183,6 +207,7 @@ export async function removeKnownHost(
   const existing = await loadKnownHosts(store);
   const filtered = existing.filter((h) => h.label !== label);
   await persist(filtered, store);
+  log("hosts", "remove", { label, removed: existing.length - filtered.length });
 }
 
 /** Rename an entry. Errors if `oldLabel` doesn't exist or `newLabel`

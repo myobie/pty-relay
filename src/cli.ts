@@ -2,8 +2,24 @@
 
 import { hostname } from "node:os";
 import { extractTagFlags } from "./args.ts";
+import { initVerbose, installExitDiagnostics, log, now, sinceMs } from "./log.ts";
 
-const args = process.argv.slice(2);
+// Parse --verbose early — before any import that might instrument
+// itself during module load. The flag turns on verbose stderr logging
+// across every layer (HTTP, WS, secret store, noise, command entry
+// timings, and a beforeExit/exit dump of what's keeping the event
+// loop alive). Also honored via PTY_RELAY_VERBOSE or (legacy)
+// PTY_RELAY_DEBUG env vars.
+//
+// Strip --verbose from the args passed to positional parsing so
+// sub-commands never see it as a command/argument (e.g. `pty-relay
+// --verbose doctor` must still dispatch to `doctor`, not treat
+// `--verbose` as the command name).
+const rawArgs = process.argv.slice(2);
+initVerbose(rawArgs.includes("--verbose"));
+const args = rawArgs.filter((a) => a !== "--verbose");
+installExitDiagnostics();
+const cliStart = now();
 
 function getFlag(flag: string, argList: string[] = args): string | null {
   const idx = argList.indexOf(flag);
@@ -72,6 +88,8 @@ Options:
   --spawn <name>            Spawn a new remote session (for connect)
   --cwd <dir>               Working directory for spawned session
   --force                   Skip confirmation (for reset/init)
+  --verbose                 Print timing + internal state to stderr
+                             (also honored via PTY_RELAY_VERBOSE=1)
 
 Environment:
   PTY_RELAY_PASSPHRASE      Passphrase (non-interactive)
@@ -99,6 +117,13 @@ function confirmAllowSpawn(): Promise<boolean> {
 
 async function main(): Promise<void> {
   const command = args[0];
+
+  log("cli", "dispatch", {
+    command: command ?? "(none)",
+    args: args.length,
+    node: process.version,
+    platform: process.platform,
+  });
 
   // Per-command `--help`: intercept before any dispatch so users can run
   // `pty-relay <cmd> --help` and actually get help instead of having the
@@ -997,7 +1022,15 @@ Options:
 `);
 }
 
-main().catch((err) => {
-  console.error("Fatal:", err.message || err);
-  process.exit(1);
-});
+main()
+  .then(() => {
+    log("cli", "main done", { ms: sinceMs(cliStart) });
+  })
+  .catch((err) => {
+    log("cli", "main threw", {
+      ms: sinceMs(cliStart),
+      error: err?.message ?? String(err),
+    });
+    console.error("Fatal:", err.message || err);
+    process.exit(1);
+  });
