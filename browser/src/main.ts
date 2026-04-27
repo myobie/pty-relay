@@ -453,6 +453,20 @@ let packetParser = new PacketParser();
 let resizeObserver: ResizeObserver | null = null;
 let sessionAttached = false;
 
+// Static document.title used when nothing is attached. We restore it
+// on detach so the browser tab stops claiming a stale session/OSC title.
+const DEFAULT_DOC_TITLE = "pty relay";
+
+/** Wire xterm.js's OSC 0/2 (terminal title) hook to document.title so
+ *  the browser tab reflects what a native terminal would show in its
+ *  window title. Falls back to the session name if the program clears
+ *  the title (empty OSC). */
+function bindTerminalTitle(t: Terminal, fallbackName: string): void {
+  t.onTitleChange((title) => {
+    document.title = (title && title.length > 0) ? title : fallbackName;
+  });
+}
+
 function sendEncrypted(data: Uint8Array | string): void {
   if (!transport || !ws || ws.readyState !== WebSocket.OPEN) return;
   const ct = transport.encrypt(
@@ -475,6 +489,7 @@ function disconnect(): void {
     clearTimeout(reconnectTimer);
     reconnectTimer = null;
   }
+  document.title = DEFAULT_DOC_TITLE;
   if (term) {
     term.dispose();
     term = null;
@@ -499,6 +514,9 @@ function disconnect(): void {
 function attachToSession(sessionName: string, _cols: number, _rows: number): void {
   currentSession = sessionName;
   sessionNameLabel.textContent = sessionName;
+  // Default tab title to the session name on attach. If the running
+  // program emits OSC 0/2 we'll override via bindTerminalTitle below.
+  document.title = sessionName;
   showView("terminal");
   if (!term) {
     term = new Terminal({
@@ -521,6 +539,7 @@ function attachToSession(sessionName: string, _cols: number, _rows: number): voi
     term.onData((data) => {
       if (sessionAttached) sendPtyPacket(makeData(data));
     });
+    bindTerminalTitle(term, sessionName);
   }
   sendJson({
     type: "attach",
@@ -551,6 +570,7 @@ function handleDecryptedMessage(plaintext: Uint8Array): void {
       } else if (msg.type === "spawned") {
         currentSession = msg.session;
         sessionNameLabel.textContent = msg.session;
+        document.title = msg.session;
         showView("terminal");
         if (!term) {
           term = new Terminal({
@@ -573,6 +593,7 @@ function handleDecryptedMessage(plaintext: Uint8Array): void {
           term.onData((data) => {
             if (sessionAttached) sendPtyPacket(makeData(data));
           });
+          bindTerminalTitle(term, msg.session);
         }
         return;
       } else if (msg.type === "sessions") {
@@ -742,6 +763,7 @@ detachBtn.addEventListener("click", () => {
   if (sessionAttached) sendPtyPacket(makeDetach());
   sessionAttached = false;
   currentSession = null;
+  document.title = DEFAULT_DOC_TITLE;
   packetParser = new PacketParser();
   if (term) {
     term.dispose();

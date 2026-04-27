@@ -333,6 +333,12 @@ var fitAddon = null;
 var packetParser = new PacketParser();
 var resizeObserver = null;
 var sessionAttached = false;
+var DEFAULT_DOC_TITLE = "pty relay";
+function bindTerminalTitle(t, fallbackName) {
+  t.onTitleChange((title) => {
+    document.title = title && title.length > 0 ? title : fallbackName;
+  });
+}
 function sendEncrypted(data) {
   if (!transport || !ws || ws.readyState !== WebSocket.OPEN) return;
   const ct = transport.encrypt(
@@ -352,6 +358,7 @@ function disconnect() {
     clearTimeout(reconnectTimer);
     reconnectTimer = null;
   }
+  document.title = DEFAULT_DOC_TITLE;
   if (term) {
     term.dispose();
     term = null;
@@ -375,6 +382,7 @@ function disconnect() {
 function attachToSession(sessionName, _cols, _rows) {
   currentSession = sessionName;
   sessionNameLabel.textContent = sessionName;
+  document.title = sessionName;
   showView("terminal");
   if (!term) {
     term = new Terminal({
@@ -397,6 +405,7 @@ function attachToSession(sessionName, _cols, _rows) {
     term.onData((data) => {
       if (sessionAttached) sendPtyPacket(makeData(data));
     });
+    bindTerminalTitle(term, sessionName);
   }
   sendJson({
     type: "attach",
@@ -422,6 +431,7 @@ function handleDecryptedMessage(plaintext) {
       } else if (msg.type === "spawned") {
         currentSession = msg.session;
         sessionNameLabel.textContent = msg.session;
+        document.title = msg.session;
         showView("terminal");
         if (!term) {
           term = new Terminal({
@@ -444,6 +454,7 @@ function handleDecryptedMessage(plaintext) {
           term.onData((data) => {
             if (sessionAttached) sendPtyPacket(makeData(data));
           });
+          bindTerminalTitle(term, msg.session);
         }
         return;
       } else if (msg.type === "sessions") {
@@ -567,6 +578,7 @@ detachBtn.addEventListener("click", () => {
   if (sessionAttached) sendPtyPacket(makeDetach());
   sessionAttached = false;
   currentSession = null;
+  document.title = DEFAULT_DOC_TITLE;
   packetParser = new PacketParser();
   if (term) {
     term.dispose();

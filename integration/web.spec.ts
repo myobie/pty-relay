@@ -152,6 +152,31 @@ test.describe("web UI via self-hosted relay", () => {
     await expect(label).toHaveText(ptySession.name);
   });
 
+  test("document.title reflects terminal OSC 2 title (and falls back to session name)", async ({ page }) => {
+    await page.goto(tokenUrl);
+    await waitForTerminalText(page, "$");
+
+    // Default after attach: tab title is the session name (no OSC seen yet).
+    await expect.poll(() => page.title()).toBe(ptySession.name);
+
+    // Emit OSC 2 to set the terminal window title — printf inside bash
+    // is the cleanest way to send the escape sequence verbatim.
+    await page.locator("#terminal-container").click();
+    await page.keyboard.type(`printf '\\033]2;web-osc-title-test\\007'\n`);
+
+    // xterm.js fires onTitleChange synchronously after parsing the
+    // sequence, but the chain bash -> pty -> daemon -> ws -> xterm has
+    // some latency; poll for the title change.
+    await expect.poll(() => page.title(), { timeout: 5000 }).toBe(
+      "web-osc-title-test"
+    );
+
+    // After detach the title should reset to the static app name so a
+    // bookmarked tab doesn't keep claiming a session it isn't on.
+    await page.locator("#detach-btn").click();
+    await expect.poll(() => page.title(), { timeout: 5000 }).toBe("pty relay");
+  });
+
   test("detach button returns to session list", async ({ page }) => {
     await page.goto(tokenUrl);
     await waitForTerminalText(page, "$");
