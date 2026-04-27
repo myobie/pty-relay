@@ -83,6 +83,10 @@ export function handleSessionControlMessage(
     clientId,
     type: typeof type === "string" ? type : typeof type,
     session: typeof msg.session === "string" ? msg.session : undefined,
+    // attach/spawn carry cols+rows; logging them makes resize bugs
+    // visible without browser-side instrumentation.
+    cols: typeof msg.cols === "number" ? msg.cols : undefined,
+    rows: typeof msg.rows === "number" ? msg.rows : undefined,
   });
 
   if (type === "list") {
