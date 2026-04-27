@@ -163,8 +163,12 @@ test.describe("web UI via self-hosted relay", () => {
       return el?.style.display === "flex";
     }, undefined, { timeout: 5000 });
 
-    const cards = page.locator(".session-card");
-    await expect(cards).not.toHaveCount(0);
+    // After the TUI revamp, sessions render as `.session-row` rows
+    // (the previous `.session-card` boxes are gone). Filter out the
+    // "+ new session" CTA row by looking for `.col-name`, which only
+    // real session rows carry.
+    const rows = page.locator(".session-row:has(.col-name)");
+    await expect(rows).not.toHaveCount(0);
   });
 });
 
@@ -177,11 +181,11 @@ test.describe("session list via self-hosted relay", () => {
       return el?.style.display === "flex";
     }, undefined, { timeout: 15000 });
 
-    const cards = page.locator(".session-card");
-    await expect(cards).not.toHaveCount(0);
+    const rows = page.locator(".session-row:has(.col-name)");
+    await expect(rows).not.toHaveCount(0);
   });
 
-  test("clicking a session card opens terminal", async ({ page }) => {
+  test("clicking a session row opens terminal", async ({ page }) => {
     await page.goto(baseToken);
 
     await page.waitForFunction(() => {
@@ -189,9 +193,10 @@ test.describe("session list via self-hosted relay", () => {
       return el?.style.display === "flex";
     }, undefined, { timeout: 15000 });
 
-    // Click a real session card (skip the "+ New Session" button)
-    const card = page.locator(".session-card:not([style*='dashed'])").first();
-    await card.click();
+    // Click a real session row (one with a name column — skips the
+    // "+ new session" CTA which has only a single span).
+    const row = page.locator(".session-row:has(.col-name)").first();
+    await row.click();
 
     await expect(page.locator("#terminal-view")).toBeVisible();
     await expect(page.locator("#session-name-label")).not.toHaveText("");
@@ -211,8 +216,9 @@ test.describe("spawn via self-hosted relay web UI", () => {
       return el?.style.display === "flex";
     }, undefined, { timeout: 15000 });
 
-    const newBtn = page.locator(".session-card").first();
-    await expect(newBtn).toContainText("New Session");
+    // The "+ new session" CTA is the only row with a .new-session-cta span.
+    const newBtn = page.locator(".session-row .new-session-cta");
+    await expect(newBtn).toContainText("new session");
 
     const spawnName = `web-spawn-${Date.now()}`;
     let dialogCount = 0;

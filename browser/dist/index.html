@@ -36,39 +36,75 @@
       flex-direction: column;
     }
 
-    /* --- Session List --- */
+    /* --- Session List (TUI-style) --- */
     #session-list {
       display: none;
       flex-direction: column;
       height: var(--vh);
-      padding: 20px;
+      padding: 16px 20px;
       overflow-y: auto;
+      font-family: 'SF Mono', 'Menlo', 'Consolas', 'Monaco', monospace;
+      font-size: 13px;
     }
     #session-list h1 {
-      font-size: 13px;
-      margin-bottom: 16px;
+      font-size: 11px;
+      margin-bottom: 8px;
       color: var(--accent);
       text-transform: uppercase;
       letter-spacing: 1px;
+      font-weight: normal;
     }
-    .session-card {
-      background: #111;
-      border-radius: 0;
-      padding: 14px 16px;
-      margin-bottom: 10px;
+    .session-list-header {
+      display: grid;
+      grid-template-columns: 1fr 1.4fr 1.6fr 1.4fr;
+      gap: 1.5ch;
+      padding: 4px 0;
+      color: #555;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      font-size: 11px;
+      border-bottom: 1px dashed #2a2a2a;
+    }
+    .session-row {
+      display: grid;
+      grid-template-columns: 1fr 1.4fr 1.6fr 1.4fr;
+      gap: 1.5ch;
+      padding: 4px 0;
       cursor: pointer;
-      border: 1px solid #333;
+      color: #ccc;
+      border-bottom: 1px dotted #1a1a1a;
     }
-    .session-card:active { background: #1a1a1a; }
-    .session-card .name { font-weight: normal; font-size: 15px; color: #e0e0e0; }
-    .session-card .meta { font-size: 13px; color: #666; margin-top: 4px; }
-    .session-card .status {
-      display: inline-block;
-      width: 8px; height: 8px;
-      border-radius: 50%;
-      background: #4caf50;
-      margin-right: 6px;
-      vertical-align: middle;
+    .session-row:hover { background: #111; }
+    .session-row .col {
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .session-row .col-name { color: #e0e0e0; }
+    .session-row .col-cmd { color: #aaa; }
+    .session-row .col-cwd { color: #888; }
+    .session-row .col-tags { color: #6da; }
+    .session-row .tag { margin-right: 1ch; }
+    .session-row .tag-more {
+      color: var(--accent);
+      cursor: pointer;
+      text-decoration: underline dotted;
+    }
+    .session-row.expanded { background: #0d0d0d; }
+    .session-row.expanded .col {
+      white-space: normal;
+      overflow: visible;
+    }
+    .session-row .new-session-cta {
+      grid-column: 1 / -1;
+      color: var(--accent);
+      cursor: pointer;
+    }
+    .session-row.empty {
+      grid-column: 1 / -1;
+      color: #666;
+      cursor: default;
+      font-style: italic;
     }
 
     /* --- Terminal --- */
