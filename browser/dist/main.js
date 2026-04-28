@@ -373,6 +373,89 @@ function makeCol(extraClass, text) {
   return el;
 }
 
+// browser/src/latency-stats.ts
+var SAMPLE_CAP = 200;
+function createLatencyTracker(term2) {
+  const pending = [];
+  const samples = [];
+  let trackerStartedAt = performance.now();
+  const onDataDisposer = term2.onData((data) => {
+    const now = performance.now();
+    for (let i = 0; i < data.length; i++) pending.push(now);
+  });
+  const onRenderDisposer = term2.onRender(() => {
+    if (pending.length === 0) return;
+    const sentAt = pending.shift();
+    const elapsed = performance.now() - sentAt;
+    samples.push(elapsed);
+    if (samples.length > SAMPLE_CAP) samples.shift();
+  });
+  return {
+    summary() {
+      if (samples.length === 0) {
+        return {
+          count: 0,
+          pending: pending.length,
+          min: 0,
+          median: 0,
+          p95: 0,
+          max: 0,
+          samples: [],
+          windowSec: (performance.now() - trackerStartedAt) / 1e3
+        };
+      }
+      const sorted = samples.slice().sort((a, b) => a - b);
+      const pct = (p) => sorted[Math.max(0, Math.min(sorted.length - 1, Math.ceil(sorted.length * p) - 1))];
+      return {
+        count: samples.length,
+        pending: pending.length,
+        min: round1(sorted[0]),
+        median: round1(pct(0.5)),
+        p95: round1(pct(0.95)),
+        max: round1(sorted[sorted.length - 1]),
+        samples: samples.slice(),
+        windowSec: round1((performance.now() - trackerStartedAt) / 1e3)
+      };
+    },
+    reset() {
+      pending.length = 0;
+      samples.length = 0;
+      trackerStartedAt = performance.now();
+    },
+    destroy() {
+      onDataDisposer.dispose();
+      onRenderDisposer.dispose();
+    }
+  };
+}
+function round1(n) {
+  return Math.round(n * 10) / 10;
+}
+function formatSummary(s, context = {}) {
+  const lines = [
+    "pty-relay web latency",
+    "\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500",
+    `samples: ${s.count}   pending: ${s.pending}   window: ${s.windowSec}s`
+  ];
+  if (s.count > 0) {
+    lines.push(
+      `min: ${s.min}ms   median: ${s.median}ms   p95: ${s.p95}ms   max: ${s.max}ms`
+    );
+  } else {
+    lines.push("(no samples yet \u2014 type some characters into the terminal)");
+  }
+  if (context.ua) lines.push(`ua: ${context.ua}`);
+  if (context.relay) lines.push(`relay: ${context.relay}`);
+  if (context.viewportW && context.viewportH) {
+    lines.push(`viewport: ${context.viewportW}\xD7${context.viewportH}`);
+  }
+  return lines.join("\n");
+}
+function formatCompact(s) {
+  if (s.count === 0) return `n=0`;
+  return `n=${s.count} p50=${s.median}ms p95=${s.p95}ms`;
+}
+
 // browser/src/main.ts
 var MSG_DATA = 0;
 var MSG_DETACH = 2;
@@ -678,6 +761,8 @@ var sessionsContainer = document.getElementById("sessions-container");
 var sessionNameLabel = document.getElementById("session-name-label");
 var terminalContainer = document.getElementById("terminal-container");
 var detachBtn = document.getElementById("detach-btn");
+var statsBtn = document.getElementById("stats-btn");
+var latencyStatEl = document.getElementById("latency-stat");
 function showView(view) {
   statusOverlay.style.display = "none";
   sessionListEl.style.display = "none";
@@ -711,6 +796,33 @@ function bindTerminalTitle(t, fallbackName) {
     document.title = title && title.length > 0 ? title : fallbackName;
   });
 }
+var latencyTracker = null;
+var latencyTickHandle = null;
+var LATENCY_TICK_MS = 1e3;
+function bindLatencyTracker(t) {
+  if (latencyTracker) latencyTracker.destroy();
+  latencyTracker = createLatencyTracker(t);
+  if (latencyTickHandle) clearInterval(latencyTickHandle);
+  latencyTickHandle = setInterval(() => {
+    if (!latencyTracker) return;
+    const s = latencyTracker.summary();
+    latencyStatEl.textContent = formatCompact(s);
+    latencyStatEl.classList.toggle("warn", s.count > 0 && s.median >= 60);
+    latencyStatEl.classList.toggle("bad", s.count > 0 && s.median >= 120);
+  }, LATENCY_TICK_MS);
+}
+function teardownLatencyTracker() {
+  if (latencyTickHandle) {
+    clearInterval(latencyTickHandle);
+    latencyTickHandle = null;
+  }
+  if (latencyTracker) {
+    latencyTracker.destroy();
+    latencyTracker = null;
+  }
+  latencyStatEl.textContent = "";
+  latencyStatEl.classList.remove("warn", "bad");
+}
 function sendEncrypted(data) {
   if (!transport || !ws || ws.readyState !== WebSocket.OPEN) return;
   const ct = transport.encrypt(
@@ -731,6 +843,7 @@ function disconnect() {
     reconnectTimer = null;
   }
   document.title = DEFAULT_DOC_TITLE;
+  teardownLatencyTracker();
   if (term) {
     term.dispose();
     term = null;
@@ -760,7 +873,11 @@ function attachToSession(sessionName, _cols, _rows) {
     term = new Terminal({
       cursorBlink: true,
       fontSize: 14,
-      smoothScrollDuration: 80,
+      // smoothScrollDuration was 80ms — animating scrolls felt
+      // sluggish for typing where every output line shifts the
+      // viewport. 0 disables the animation; xterm renders at the
+      // next RAF as before, but no easing layer on top.
+      smoothScrollDuration: 0,
       theme: { background: "#0a0a0a" }
     });
     fitAddon = new FitAddon();
@@ -778,6 +895,7 @@ function attachToSession(sessionName, _cols, _rows) {
       if (sessionAttached) sendPtyPacket(makeData(data));
     });
     bindTerminalTitle(term, sessionName);
+    bindLatencyTracker(term);
   }
   sendJson({
     type: "attach",
@@ -809,7 +927,11 @@ function handleDecryptedMessage(plaintext) {
           term = new Terminal({
             cursorBlink: true,
             fontSize: 14,
-            smoothScrollDuration: 80,
+            // smoothScrollDuration was 80ms — animating scrolls felt
+            // sluggish for typing where every output line shifts the
+            // viewport. 0 disables the animation; xterm renders at the
+            // next RAF as before, but no easing layer on top.
+            smoothScrollDuration: 0,
             theme: { background: "#0a0a0a" }
           });
           fitAddon = new FitAddon();
@@ -827,6 +949,7 @@ function handleDecryptedMessage(plaintext) {
             if (sessionAttached) sendPtyPacket(makeData(data));
           });
           bindTerminalTitle(term, msg.session);
+          bindLatencyTracker(term);
         }
         return;
       } else if (msg.type === "sessions") {
@@ -886,12 +1009,30 @@ function renderSessionList(sessions) {
   overviewView.update(sessions);
   showView("sessions");
 }
+statsBtn.addEventListener("click", async () => {
+  if (!latencyTracker) return;
+  const summary = latencyTracker.summary();
+  const text = formatSummary(summary, {
+    ua: navigator.userAgent,
+    relay: token ? `${location.protocol}//${token.host}` : void 0,
+    viewportW: window.innerWidth,
+    viewportH: window.innerHeight
+  });
+  try {
+    await navigator.clipboard.writeText(text);
+  } catch {
+    console.log(text);
+  }
+  statsBtn.classList.add("copied");
+  setTimeout(() => statsBtn.classList.remove("copied"), 600);
+});
 detachBtn.addEventListener("click", () => {
   if (sessionAttached) sendPtyPacket(makeDetach());
   sessionAttached = false;
   currentSession = null;
   document.title = DEFAULT_DOC_TITLE;
   packetParser = new PacketParser();
+  teardownLatencyTracker();
   if (term) {
     term.dispose();
     term = null;

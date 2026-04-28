@@ -313,7 +313,22 @@
       padding: 4px 10px;
       font-size: 12px;
       cursor: pointer;
+      margin-left: 6px;
     }
+    /* Compact one-line stat indicator next to the session name. Updates
+       every render via the latency tracker. Click "Stats" to copy a
+       fuller breakdown to the clipboard. */
+    .latency-stat {
+      color: #555;
+      font-size: 11px;
+      margin: 0 8px;
+      font-family: 'SF Mono', 'Menlo', 'Consolas', 'Monaco', monospace;
+      white-space: nowrap;
+    }
+    .latency-stat.warn { color: #c80; }
+    .latency-stat.bad { color: #c44; }
+    /* Brief flash after a successful copy. */
+    #stats-btn.copied { background: #234; color: var(--accent); }
     #terminal-container {
       flex: 1;
       overflow: hidden;
@@ -419,6 +434,8 @@
   <div id="terminal-view">
     <div id="toolbar">
       <span class="session-name" id="session-name-label"></span>
+      <span id="latency-stat" class="latency-stat" title="Click 'Stats' to copy a full latency summary"></span>
+      <button id="stats-btn" title="Copy latency stats to clipboard">Stats</button>
       <button id="detach-btn">Detach</button>
     </div>
     <div id="terminal-container"></div>

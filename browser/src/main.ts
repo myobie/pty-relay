@@ -416,6 +416,8 @@ const sessionsContainer = document.getElementById("sessions-container")!;
 const sessionNameLabel = document.getElementById("session-name-label")!;
 const terminalContainer = document.getElementById("terminal-container")!;
 const detachBtn = document.getElementById("detach-btn")!;
+const statsBtn = document.getElementById("stats-btn")!;
+const latencyStatEl = document.getElementById("latency-stat")!;
 
 type View = "loading" | "sessions" | "terminal";
 
@@ -467,6 +469,42 @@ function bindTerminalTitle(t: Terminal, fallbackName: string): void {
   });
 }
 
+// ── Latency tracking (live, attached to the active terminal) ──
+//
+// One tracker per terminal instance. Created when a Terminal is
+// constructed (attach or spawn paths) and torn down on detach.
+// Refreshes the toolbar's compact "n=42 p50=38ms p95=72ms" indicator
+// on a tick; "Stats" button copies the full breakdown.
+let latencyTracker: LatencyTracker | null = null;
+let latencyTickHandle: ReturnType<typeof setInterval> | null = null;
+const LATENCY_TICK_MS = 1000;
+
+function bindLatencyTracker(t: Terminal): void {
+  if (latencyTracker) latencyTracker.destroy();
+  latencyTracker = createLatencyTracker(t);
+  if (latencyTickHandle) clearInterval(latencyTickHandle);
+  latencyTickHandle = setInterval(() => {
+    if (!latencyTracker) return;
+    const s = latencyTracker.summary();
+    latencyStatEl.textContent = formatCompact(s);
+    latencyStatEl.classList.toggle("warn", s.count > 0 && s.median >= 60);
+    latencyStatEl.classList.toggle("bad", s.count > 0 && s.median >= 120);
+  }, LATENCY_TICK_MS);
+}
+
+function teardownLatencyTracker(): void {
+  if (latencyTickHandle) {
+    clearInterval(latencyTickHandle);
+    latencyTickHandle = null;
+  }
+  if (latencyTracker) {
+    latencyTracker.destroy();
+    latencyTracker = null;
+  }
+  latencyStatEl.textContent = "";
+  latencyStatEl.classList.remove("warn", "bad");
+}
+
 function sendEncrypted(data: Uint8Array | string): void {
   if (!transport || !ws || ws.readyState !== WebSocket.OPEN) return;
   const ct = transport.encrypt(
@@ -490,6 +528,7 @@ function disconnect(): void {
     reconnectTimer = null;
   }
   document.title = DEFAULT_DOC_TITLE;
+  teardownLatencyTracker();
   if (term) {
     term.dispose();
     term = null;
@@ -522,7 +561,11 @@ function attachToSession(sessionName: string, _cols: number, _rows: number): voi
     term = new Terminal({
       cursorBlink: true,
       fontSize: 14,
-      smoothScrollDuration: 80,
+      // smoothScrollDuration was 80ms — animating scrolls felt
+      // sluggish for typing where every output line shifts the
+      // viewport. 0 disables the animation; xterm renders at the
+      // next RAF as before, but no easing layer on top.
+      smoothScrollDuration: 0,
       theme: { background: "#0a0a0a" },
     });
     fitAddon = new FitAddon();
@@ -540,6 +583,7 @@ function attachToSession(sessionName: string, _cols: number, _rows: number): voi
       if (sessionAttached) sendPtyPacket(makeData(data));
     });
     bindTerminalTitle(term, sessionName);
+    bindLatencyTracker(term);
   }
   sendJson({
     type: "attach",
@@ -576,7 +620,11 @@ function handleDecryptedMessage(plaintext: Uint8Array): void {
           term = new Terminal({
             cursorBlink: true,
             fontSize: 14,
-            smoothScrollDuration: 80,
+            // smoothScrollDuration was 80ms — animating scrolls felt
+      // sluggish for typing where every output line shifts the
+      // viewport. 0 disables the animation; xterm renders at the
+      // next RAF as before, but no easing layer on top.
+      smoothScrollDuration: 0,
             theme: { background: "#0a0a0a" },
           });
           fitAddon = new FitAddon();
@@ -594,6 +642,7 @@ function handleDecryptedMessage(plaintext: Uint8Array): void {
             if (sessionAttached) sendPtyPacket(makeData(data));
           });
           bindTerminalTitle(term, msg.session);
+          bindLatencyTracker(term);
         }
         return;
       } else if (msg.type === "sessions") {
@@ -635,6 +684,12 @@ import {
   type SessionListView,
   type SessionMeta,
 } from "./session-list-view.ts";
+import {
+  createLatencyTracker,
+  formatSummary,
+  formatCompact,
+  type LatencyTracker,
+} from "./latency-stats.ts";
 
 function spawnSession(name: string, cwd?: string): void {
   showStatus("Starting session...");
@@ -669,12 +724,33 @@ function renderSessionList(sessions: SessionMeta[]): void {
   showView("sessions");
 }
 
+statsBtn.addEventListener("click", async () => {
+  if (!latencyTracker) return;
+  const summary = latencyTracker.summary();
+  const text = formatSummary(summary, {
+    ua: navigator.userAgent,
+    relay: token ? `${location.protocol}//${token.host}` : undefined,
+    viewportW: window.innerWidth,
+    viewportH: window.innerHeight,
+  });
+  try {
+    await navigator.clipboard.writeText(text);
+  } catch {
+    // Clipboard API can fail in non-secure contexts. Fallback: log to
+    // console so the user can still grab it from devtools.
+    console.log(text);
+  }
+  statsBtn.classList.add("copied");
+  setTimeout(() => statsBtn.classList.remove("copied"), 600);
+});
+
 detachBtn.addEventListener("click", () => {
   if (sessionAttached) sendPtyPacket(makeDetach());
   sessionAttached = false;
   currentSession = null;
   document.title = DEFAULT_DOC_TITLE;
   packetParser = new PacketParser();
+  teardownLatencyTracker();
   if (term) {
     term.dispose();
     term = null;
