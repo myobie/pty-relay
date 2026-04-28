@@ -3,6 +3,92 @@ import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import sodium from "libsodium-wrappers-sumo";
 
+// ../pty/src/tui/fuzzy.ts
+function fuzzyMatch(query, target) {
+  if (query.length === 0) return { match: true, score: 1 };
+  const q = query.toLowerCase();
+  const t = target.toLowerCase();
+  if (q.length > t.length) return { match: false, score: 0 };
+  let qi = 0;
+  for (let ti = 0; ti < t.length && qi < q.length; ti++) {
+    if (t[ti] === q[qi]) qi++;
+  }
+  if (qi < q.length) return { match: false, score: 0 };
+  const matchPositions = findBestMatch(q, t);
+  let score = 0;
+  let consecutive = 0;
+  for (let i = 0; i < matchPositions.length; i++) {
+    if (i > 0 && matchPositions[i] === matchPositions[i - 1] + 1) {
+      consecutive++;
+      score += consecutive * 2;
+    } else {
+      consecutive = 0;
+    }
+  }
+  for (const pos of matchPositions) {
+    if (pos === 0 || isBoundary(t, pos)) {
+      score += 3;
+    }
+  }
+  if (matchPositions[0] === 0) {
+    score += 5;
+  }
+  score += Math.max(0, 10 - (t.length - q.length));
+  return { match: true, score };
+}
+function isBoundary(str, pos) {
+  if (pos === 0) return true;
+  const prev = str[pos - 1];
+  return prev === "-" || prev === "_" || prev === "/" || prev === " " || prev === ".";
+}
+function findBestMatch(query, target) {
+  const boundaryMatch = matchPreferBoundaries(query, target);
+  if (boundaryMatch) return boundaryMatch;
+  const positions = [];
+  let qi = 0;
+  for (let ti = 0; ti < target.length && qi < query.length; ti++) {
+    if (target[ti] === query[qi]) {
+      positions.push(ti);
+      qi++;
+    }
+  }
+  return positions;
+}
+function matchPreferBoundaries(query, target) {
+  const positions = [];
+  let qi = 0;
+  let ti = 0;
+  while (qi < query.length && ti < target.length) {
+    let foundBoundary = false;
+    for (let ahead = ti; ahead < target.length; ahead++) {
+      if (target[ahead] === query[qi] && isBoundary(target, ahead)) {
+        if (canMatch(query, qi + 1, target, ahead + 1)) {
+          positions.push(ahead);
+          qi++;
+          ti = ahead + 1;
+          foundBoundary = true;
+          break;
+        }
+      }
+    }
+    if (!foundBoundary) {
+      while (ti < target.length && target[ti] !== query[qi]) ti++;
+      if (ti >= target.length) return null;
+      positions.push(ti);
+      qi++;
+      ti++;
+    }
+  }
+  return qi === query.length ? positions : null;
+}
+function canMatch(query, qi, target, ti) {
+  while (qi < query.length && ti < target.length) {
+    if (target[ti] === query[qi]) qi++;
+    ti++;
+  }
+  return qi >= query.length;
+}
+
 // browser/src/session-list-view.ts
 function shortenCwd(cwd) {
   const home = "/Users/";
@@ -31,8 +117,82 @@ function formatTags(tags) {
     total: all.length
   };
 }
-function renderSessionList(container, sessions, callbacks) {
+function scoreSession(query, s) {
+  if (!query) return { match: true, score: 0 };
+  const fields = [s.name, s.command || "", s.cwd || ""];
+  if (s.displayName) fields.push(s.displayName);
+  if (s.tags) {
+    for (const [k, v] of Object.entries(s.tags)) {
+      fields.push(k);
+      if (v) fields.push(v);
+    }
+  }
+  let best = { match: false, score: 0 };
+  for (const f of fields) {
+    if (!f) continue;
+    const r = fuzzyMatch(query, f);
+    if (r.match && r.score > best.score) best = r;
+  }
+  return best;
+}
+function createSessionListView(container, callbacks) {
+  const state = {
+    sessions: [],
+    filter: "",
+    sortKey: "name",
+    sortDir: "asc"
+  };
   container.replaceChildren();
+  const toolbar = document.createElement("div");
+  toolbar.className = "session-list-toolbar";
+  const filterWrap = document.createElement("label");
+  filterWrap.className = "filter-input-wrap";
+  const filterPrompt = document.createElement("span");
+  filterPrompt.className = "filter-prompt";
+  filterPrompt.textContent = "/";
+  const filterInput = document.createElement("input");
+  filterInput.type = "text";
+  filterInput.className = "filter-input";
+  filterInput.placeholder = "filter\u2026";
+  filterInput.spellcheck = false;
+  filterInput.autocomplete = "off";
+  filterInput.setAttribute("aria-label", "filter sessions");
+  filterWrap.appendChild(filterPrompt);
+  filterWrap.appendChild(filterInput);
+  const sortWrap = document.createElement("div");
+  sortWrap.className = "sort-controls";
+  const sortLabel = document.createElement("span");
+  sortLabel.className = "sort-label";
+  sortLabel.textContent = "sort:";
+  sortWrap.appendChild(sortLabel);
+  const sortButtons = {
+    name: makeSortButton("name"),
+    cmd: makeSortButton("cmd"),
+    cwd: makeSortButton("cwd")
+  };
+  function makeSortButton(key) {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "sort-btn";
+    btn.dataset.key = key;
+    btn.addEventListener("click", () => {
+      if (state.sortKey === key) {
+        state.sortDir = state.sortDir === "asc" ? "desc" : "asc";
+      } else {
+        state.sortKey = key;
+        state.sortDir = "asc";
+      }
+      renderRows();
+      paintSortButtons();
+    });
+    return btn;
+  }
+  for (const key of ["name", "cmd", "cwd"]) {
+    sortWrap.appendChild(sortButtons[key]);
+  }
+  toolbar.appendChild(filterWrap);
+  toolbar.appendChild(sortWrap);
+  container.appendChild(toolbar);
   const header = document.createElement("div");
   header.className = "session-list-header";
   for (const label of ["name", "cmd", "cwd", "tags"]) {
@@ -41,16 +201,9 @@ function renderSessionList(container, sessions, callbacks) {
     header.appendChild(span);
   }
   container.appendChild(header);
-  if (sessions.length === 0) {
-    const empty = document.createElement("div");
-    empty.className = "session-row empty";
-    empty.textContent = "no running sessions";
-    container.appendChild(empty);
-  } else {
-    for (const s of sessions) {
-      container.appendChild(buildSessionRow(s, callbacks));
-    }
-  }
+  const rowsContainer = document.createElement("div");
+  rowsContainer.className = "session-rows";
+  container.appendChild(rowsContainer);
   const newRow = document.createElement("div");
   newRow.className = "session-row new-session-row";
   const cta = document.createElement("span");
@@ -59,6 +212,97 @@ function renderSessionList(container, sessions, callbacks) {
   newRow.appendChild(cta);
   newRow.addEventListener("click", () => callbacks.onSpawn());
   container.appendChild(newRow);
+  filterInput.addEventListener("input", () => {
+    state.filter = filterInput.value;
+    renderRows();
+  });
+  filterInput.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") {
+      if (filterInput.value) {
+        filterInput.value = "";
+        state.filter = "";
+        renderRows();
+      } else {
+        filterInput.blur();
+      }
+    }
+  });
+  const onWindowKeydown = (e) => {
+    if (container.offsetParent === null) return;
+    if (e.metaKey || e.ctrlKey || e.altKey) return;
+    if (e.key.length !== 1) return;
+    const active = document.activeElement;
+    if (active && (active.tagName === "INPUT" || active.tagName === "TEXTAREA" || active.isContentEditable)) {
+      return;
+    }
+    filterInput.focus();
+  };
+  window.addEventListener("keydown", onWindowKeydown);
+  function compareSessions(a, b) {
+    const get = (s) => {
+      if (state.sortKey === "name") return (s.displayName || s.name).toLowerCase();
+      if (state.sortKey === "cmd") return (s.command || "").toLowerCase();
+      return (s.cwd || "").toLowerCase();
+    };
+    const av = get(a);
+    const bv = get(b);
+    const cmp = av < bv ? -1 : av > bv ? 1 : 0;
+    return state.sortDir === "asc" ? cmp : -cmp;
+  }
+  function applyFilterAndSort() {
+    if (state.filter) {
+      const scored = state.sessions.map((s) => ({ s, score: scoreSession(state.filter, s) })).filter((entry) => entry.score.match);
+      scored.sort((a, b) => {
+        if (b.score.score !== a.score.score) return b.score.score - a.score.score;
+        return compareSessions(a.s, b.s);
+      });
+      return scored.map((entry) => entry.s);
+    }
+    return state.sessions.slice().sort(compareSessions);
+  }
+  function paintSortButtons() {
+    for (const key of Object.keys(sortButtons)) {
+      const btn = sortButtons[key];
+      const active = state.sortKey === key;
+      btn.classList.toggle("active", active);
+      const arrow = active ? state.sortDir === "asc" ? "\u2191" : "\u2193" : "";
+      btn.textContent = arrow ? `${key}${arrow}` : key;
+    }
+  }
+  function renderRows() {
+    const visible = applyFilterAndSort();
+    rowsContainer.replaceChildren();
+    if (state.sessions.length === 0) {
+      const empty = document.createElement("div");
+      empty.className = "session-row empty";
+      empty.textContent = "no running sessions";
+      rowsContainer.appendChild(empty);
+      return;
+    }
+    if (visible.length === 0) {
+      const empty = document.createElement("div");
+      empty.className = "session-row empty";
+      empty.textContent = `no sessions match "${state.filter}"`;
+      rowsContainer.appendChild(empty);
+      return;
+    }
+    for (const s of visible) {
+      rowsContainer.appendChild(buildSessionRow(s, callbacks));
+    }
+  }
+  paintSortButtons();
+  return {
+    update(sessions) {
+      state.sessions = sessions;
+      renderRows();
+    },
+    focus() {
+      filterInput.focus();
+    },
+    destroy() {
+      window.removeEventListener("keydown", onWindowKeydown);
+    }
+  };
 }
 function buildSessionRow(s, callbacks) {
   const row = document.createElement("div");
@@ -428,7 +672,7 @@ function parseToken() {
   }
 }
 var statusOverlay = document.getElementById("status-overlay");
-var sessionListView = document.getElementById("session-list");
+var sessionListEl = document.getElementById("session-list");
 var terminalView = document.getElementById("terminal-view");
 var sessionsContainer = document.getElementById("sessions-container");
 var sessionNameLabel = document.getElementById("session-name-label");
@@ -436,10 +680,10 @@ var terminalContainer = document.getElementById("terminal-container");
 var detachBtn = document.getElementById("detach-btn");
 function showView(view) {
   statusOverlay.style.display = "none";
-  sessionListView.style.display = "none";
+  sessionListEl.style.display = "none";
   terminalView.style.display = "none";
   if (view === "loading") statusOverlay.style.display = "flex";
-  else if (view === "sessions") sessionListView.style.display = "flex";
+  else if (view === "sessions") sessionListEl.style.display = "flex";
   else if (view === "terminal") terminalView.style.display = "flex";
 }
 function showStatus(msg) {
@@ -586,7 +830,7 @@ function handleDecryptedMessage(plaintext) {
         }
         return;
       } else if (msg.type === "sessions") {
-        renderSessionList2(msg.sessions);
+        renderSessionList(msg.sessions);
         return;
       } else if (msg.type === "error") {
         showStatus(`Error: ${msg.message}`);
@@ -622,20 +866,24 @@ function spawnSession(name, cwd) {
   if (cwd) msg.cwd = cwd;
   sendJson(msg);
 }
-function renderSessionList2(sessions) {
-  renderSessionList(sessionsContainer, sessions, {
-    onAttach: (name) => {
-      const cols = Math.floor(terminalContainer.clientWidth / 9) || 80;
-      const rows = Math.floor(terminalContainer.clientHeight / 17) || 24;
-      attachToSession(name, cols, rows);
-    },
-    onSpawn: () => {
-      const name = prompt("Session name:", `shell-${Date.now() % 1e4}`);
-      if (!name) return;
-      const cwd = prompt("Working directory:", "~");
-      spawnSession(name.trim(), cwd && cwd !== "~" ? cwd : void 0);
-    }
-  });
+var overviewView = null;
+function renderSessionList(sessions) {
+  if (!overviewView) {
+    overviewView = createSessionListView(sessionsContainer, {
+      onAttach: (name) => {
+        const cols = Math.floor(terminalContainer.clientWidth / 9) || 80;
+        const rows = Math.floor(terminalContainer.clientHeight / 17) || 24;
+        attachToSession(name, cols, rows);
+      },
+      onSpawn: () => {
+        const name = prompt("Session name:", `shell-${Date.now() % 1e4}`);
+        if (!name) return;
+        const cwd = prompt("Working directory:", "~");
+        spawnSession(name.trim(), cwd && cwd !== "~" ? cwd : void 0);
+      }
+    });
+  }
+  overviewView.update(sessions);
   showView("sessions");
 }
 detachBtn.addEventListener("click", () => {

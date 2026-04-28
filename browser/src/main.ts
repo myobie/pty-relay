@@ -410,7 +410,7 @@ function parseToken(): Token | null {
 // ── DOM refs ──
 
 const statusOverlay = document.getElementById("status-overlay")!;
-const sessionListView = document.getElementById("session-list")!;
+const sessionListEl = document.getElementById("session-list")!;
 const terminalView = document.getElementById("terminal-view")!;
 const sessionsContainer = document.getElementById("sessions-container")!;
 const sessionNameLabel = document.getElementById("session-name-label")!;
@@ -421,10 +421,10 @@ type View = "loading" | "sessions" | "terminal";
 
 function showView(view: View): void {
   statusOverlay.style.display = "none";
-  sessionListView.style.display = "none";
+  sessionListEl.style.display = "none";
   terminalView.style.display = "none";
   if (view === "loading") statusOverlay.style.display = "flex";
-  else if (view === "sessions") sessionListView.style.display = "flex";
+  else if (view === "sessions") sessionListEl.style.display = "flex";
   else if (view === "terminal") terminalView.style.display = "flex";
 }
 
@@ -631,7 +631,8 @@ function handleDecryptedMessage(plaintext: Uint8Array): void {
 }
 
 import {
-  renderSessionList as renderSessionListView,
+  createSessionListView,
+  type SessionListView,
   type SessionMeta,
 } from "./session-list-view.ts";
 
@@ -642,20 +643,29 @@ function spawnSession(name: string, cwd?: string): void {
   sendJson(msg);
 }
 
+// Lazily-mounted overview view. The first sessions message after
+// connect creates it; subsequent updates reuse the same instance so
+// the filter input keeps focus and the user's sort/filter state
+// survives across updates.
+let overviewView: SessionListView | null = null;
+
 function renderSessionList(sessions: SessionMeta[]): void {
-  renderSessionListView(sessionsContainer, sessions, {
-    onAttach: (name) => {
-      const cols = Math.floor(terminalContainer.clientWidth / 9) || 80;
-      const rows = Math.floor(terminalContainer.clientHeight / 17) || 24;
-      attachToSession(name, cols, rows);
-    },
-    onSpawn: () => {
-      const name = prompt("Session name:", `shell-${Date.now() % 1e4}`);
-      if (!name) return;
-      const cwd = prompt("Working directory:", "~");
-      spawnSession(name.trim(), cwd && cwd !== "~" ? cwd : undefined);
-    },
-  });
+  if (!overviewView) {
+    overviewView = createSessionListView(sessionsContainer, {
+      onAttach: (name) => {
+        const cols = Math.floor(terminalContainer.clientWidth / 9) || 80;
+        const rows = Math.floor(terminalContainer.clientHeight / 17) || 24;
+        attachToSession(name, cols, rows);
+      },
+      onSpawn: () => {
+        const name = prompt("Session name:", `shell-${Date.now() % 1e4}`);
+        if (!name) return;
+        const cwd = prompt("Working directory:", "~");
+        spawnSession(name.trim(), cwd && cwd !== "~" ? cwd : undefined);
+      },
+    });
+  }
+  overviewView.update(sessions);
   showView("sessions");
 }
 

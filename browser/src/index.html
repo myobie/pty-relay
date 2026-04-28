@@ -74,9 +74,76 @@
       content: "// ";
       color: #2a2a2a;
     }
+    /* Toolbar above the listing — fuzzy filter input on the left,
+       sort controls on the right. Both wrap on narrow widths. */
+    .session-list-toolbar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 6px 8px 8px 8px;
+      flex-wrap: wrap;
+    }
+    .filter-input-wrap {
+      display: flex;
+      align-items: baseline;
+      gap: 6px;
+      flex: 1;
+      min-width: 0;
+      border-bottom: 1px solid #2a2a2a;
+      padding: 2px 0;
+      transition: border-color 80ms linear;
+    }
+    .filter-input-wrap:focus-within {
+      border-bottom-color: var(--accent);
+    }
+    .filter-prompt {
+      color: #555;
+      font-weight: bold;
+    }
+    .filter-input {
+      flex: 1;
+      min-width: 0;
+      background: transparent;
+      color: var(--fg);
+      border: none;
+      outline: none;
+      font: inherit;
+      padding: 0;
+    }
+    .filter-input::placeholder { color: #444; }
+    .sort-controls {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      color: #555;
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+    }
+    .sort-label { color: #555; }
+    .sort-btn {
+      background: transparent;
+      border: none;
+      color: #888;
+      font: inherit;
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      cursor: pointer;
+      padding: 2px 4px;
+    }
+    .sort-btn.active { color: var(--accent); }
+    @media (hover: hover) {
+      .sort-btn:hover { color: #ccc; }
+      .sort-btn.active:hover { color: var(--accent); }
+    }
     .session-list-header {
       display: grid;
-      grid-template-columns: 18ch 16ch minmax(20ch, 1fr) minmax(20ch, 1.4fr);
+      /* cwd gets a touch more weight (1.6fr -> 1.8fr) and the cmd
+         column tightens slightly — friend feedback says cwd is the
+         most-scanned field. */
+      grid-template-columns: 18ch 14ch minmax(22ch, 1.8fr) minmax(20ch, 1.4fr);
       gap: 2ch;
       padding: 6px 8px;
       color: #555;
@@ -85,9 +152,10 @@
       font-size: 11px;
       border-bottom: 1px solid #2a2a2a;
     }
+    .session-rows { display: contents; }
     .session-row {
       display: grid;
-      grid-template-columns: 18ch 16ch minmax(20ch, 1fr) minmax(20ch, 1.4fr);
+      grid-template-columns: 18ch 14ch minmax(22ch, 1.8fr) minmax(20ch, 1.4fr);
       gap: 2ch;
       padding: 8px;
       cursor: pointer;
@@ -113,8 +181,9 @@
       min-width: 0;
     }
     .session-row .col-name { color: #e0e0e0; }
-    .session-row .col-cmd { color: #aaa; }
-    .session-row .col-cwd { color: #888; }
+    .session-row .col-cmd { color: #888; }
+    /* cwd is the most-scanned field — bump it lighter than cmd. */
+    .session-row .col-cwd { color: #b0b0b0; }
     /* Tags cell is its own flex row so the "+N" pill is shrink-proof. */
     .session-row .col-tags {
       color: #6da;
@@ -167,20 +236,24 @@
       cursor: pointer;
     }
     .session-row.empty {
-      grid-column: 1 / -1;
+      /* Override the row grid; we just want a single italic line. */
+      display: block;
       color: #666;
       cursor: default;
       font-style: italic;
+      padding: 12px 8px;
     }
     .session-row.empty::before { content: none; }
 
-    /* Phone widths: stack each row into two lines so we can fit
-       readable values instead of 6-character truncations. */
+    /* Phone widths: stack each row into three lines so we can fit
+       readable values instead of 6-character truncations. cwd lives
+       directly under the name (not under cmd) — it's what users
+       actually scan for. */
     @media (max-width: 720px) {
       .session-list-header { display: none; }
       .session-row {
         grid-template-columns: 1fr auto;
-        grid-template-rows: auto auto;
+        grid-template-rows: auto auto auto;
         gap: 4px 1ch;
         padding: 10px 8px;
       }
@@ -193,11 +266,11 @@
         grid-row: 1;
         grid-column: 2;
         text-align: right;
+        font-size: 11px;
       }
       .session-row .col-cwd {
         grid-row: 2;
         grid-column: 1 / -1;
-        font-size: 11px;
       }
       .session-row .col-tags {
         grid-row: 3;
