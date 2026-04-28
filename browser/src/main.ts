@@ -1205,14 +1205,49 @@ function connectToRelay(): void {
   });
 }
 
+// Surface JS errors directly onto the status overlay so users without
+// devtools (mobile browsers especially) can see what's going wrong
+// when the page just sits at "Connecting...". We attach this BEFORE
+// main() runs so even an early sodium-load failure gets caught.
+function paintError(prefix: string, detail: string): void {
+  const el = document.getElementById("status-overlay");
+  if (el) {
+    el.style.display = "flex";
+    el.style.whiteSpace = "pre-wrap";
+    el.style.padding = "20px";
+    el.style.fontSize = "12px";
+    el.style.textAlign = "left";
+    el.textContent = `${prefix}\n\n${detail}`;
+  }
+}
+window.addEventListener("error", (e) => {
+  paintError(
+    "JavaScript error — page failed to initialize",
+    `${e.message}\n${e.filename || ""}:${e.lineno || ""}:${e.colno || ""}`
+  );
+});
+window.addEventListener("unhandledrejection", (e) => {
+  const r: any = e.reason;
+  paintError(
+    "Promise rejection — page failed to initialize",
+    typeof r === "string" ? r : r?.stack || r?.message || JSON.stringify(r)
+  );
+});
+
 async function main(): Promise<void> {
+  // Breadcrumb status so users can tell which init step is hanging.
+  showStatus("Initializing crypto…");
   await sodium.ready;
+  showStatus("Parsing token…");
   token = parseToken();
   if (!token) {
     showStatus("Invalid token URL. Expected: https://host/session#key.secret");
     return;
   }
+  showStatus(`Connecting to ${token.host}…`);
   connectToRelay();
 }
 
-main();
+main().catch((err) => {
+  paintError("main() crashed", String(err?.stack || err?.message || err));
+});

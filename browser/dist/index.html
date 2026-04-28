@@ -248,11 +248,17 @@
     /* Phone widths: stack each row into three lines so we can fit
        readable values instead of 6-character truncations. cwd lives
        directly under the name (not under cmd) — it's what users
-       actually scan for. */
+       actually scan for.
+       grid-template-columns uses `minmax(0, …)` on BOTH columns:
+       without the min-width:0, a long cmd string grows to its
+       intrinsic width and squeezes name to zero (see issue with
+       `bash -c '…long…'` cmds blanking session names). The name
+       column gets 1fr of remaining space, cmd is capped at 14ch
+       (~110px) and ellipsis-truncated by .col's text-overflow. */
     @media (max-width: 720px) {
       .session-list-header { display: none; }
       .session-row {
-        grid-template-columns: 1fr auto;
+        grid-template-columns: minmax(0, 1fr) minmax(0, 14ch);
         grid-template-rows: auto auto auto;
         gap: 4px 1ch;
         padding: 10px 8px;

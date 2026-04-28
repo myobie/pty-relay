@@ -1441,13 +1441,45 @@ function connectToRelay() {
     };
   });
 }
+function paintError(prefix, detail) {
+  const el = document.getElementById("status-overlay");
+  if (el) {
+    el.style.display = "flex";
+    el.style.whiteSpace = "pre-wrap";
+    el.style.padding = "20px";
+    el.style.fontSize = "12px";
+    el.style.textAlign = "left";
+    el.textContent = `${prefix}
+
+${detail}`;
+  }
+}
+window.addEventListener("error", (e) => {
+  paintError(
+    "JavaScript error \u2014 page failed to initialize",
+    `${e.message}
+${e.filename || ""}:${e.lineno || ""}:${e.colno || ""}`
+  );
+});
+window.addEventListener("unhandledrejection", (e) => {
+  const r = e.reason;
+  paintError(
+    "Promise rejection \u2014 page failed to initialize",
+    typeof r === "string" ? r : r?.stack || r?.message || JSON.stringify(r)
+  );
+});
 async function main() {
+  showStatus("Initializing crypto\u2026");
   await sodium.ready;
+  showStatus("Parsing token\u2026");
   token = parseToken();
   if (!token) {
     showStatus("Invalid token URL. Expected: https://host/session#key.secret");
     return;
   }
+  showStatus(`Connecting to ${token.host}\u2026`);
   connectToRelay();
 }
-main();
+main().catch((err) => {
+  paintError("main() crashed", String(err?.stack || err?.message || err));
+});
