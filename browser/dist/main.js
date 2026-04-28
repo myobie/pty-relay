@@ -1046,7 +1046,7 @@ function connectToRelay() {
         scheduleReconnect();
         return;
       }
-      if (handshakeComplete && !intentionalDisconnect) {
+      if (!intentionalDisconnect) {
         scheduleReconnect();
       }
     };

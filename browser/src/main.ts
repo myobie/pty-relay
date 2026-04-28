@@ -1102,7 +1102,17 @@ function connectToRelay(): void {
         scheduleReconnect();
         return;
       }
-      if (handshakeComplete && !intentionalDisconnect) {
+      // Always retry on close — the only thing that should stop us is
+      // an explicit `intentionalDisconnect` (user hit Detach) or no
+      // token (we never had a session). Previously this required
+      // `handshakeComplete`, which broke daemon-restart recovery: the
+      // first retry-after-close lands while the daemon is still
+      // booting, that retry's WebSocket closes with handshakeComplete
+      // still false (closure-local to this connectToRelay call), and
+      // we'd silently give up. scheduleReconnect itself gates on
+      // intentionalDisconnect + token, so the check here is redundant
+      // beyond honoring the user's "leave me alone" intent.
+      if (!intentionalDisconnect) {
         scheduleReconnect();
       }
     };

@@ -547,3 +547,91 @@ test.describe("approval flow persists via localStorage (not URL)", () => {
     expect(newPending).toBeDefined();
   });
 });
+
+// ── Daemon-restart auto-reconnect ──
+//
+// The browser's reconnect loop should bring the page back automatically
+// when the daemon process is restarted (same identity, same encrypted
+// store, same listening port). The bug we're guarding against: the WS
+// onclose handler used to require `handshakeComplete` to schedule a
+// reconnect, but that flag is closure-local to each connectToRelay()
+// call. So a reconnect attempt that itself failed (because the daemon
+// was still booting) wouldn't schedule another retry.
+
+test.describe("auto-reconnect after daemon restart", () => {
+  // Use a separate daemon + pty session for this describe so we can
+  // freely kill+respawn the daemon without disturbing the file-level
+  // shared state used by the other test groups.
+  const RECONNECT_PORT = 18298;
+  let reconnectServer: Session;
+  let reconnectPty: Session;
+  let reconnectRelayDir: string;
+  let reconnectBaseToken: string;
+
+  function startDaemon(): Session {
+    return Session.spawn(
+      "node",
+      [
+        CLI_ENTRY,
+        "local",
+        "start",
+        String(RECONNECT_PORT),
+        "--config-dir",
+        reconnectRelayDir,
+        "--auto-approve",
+      ],
+      { rows: 24, cols: 200, env: { PTY_SESSION_DIR: stateDir } }
+    );
+  }
+
+  test.beforeAll(async () => {
+    reconnectRelayDir = path.join(stateDir, "reconnect-relay");
+
+    reconnectPty = await Session.server("bash", [], { rows: 24, cols: 80 });
+    await reconnectPty.attach();
+    await reconnectPty.waitForText("$", 5000);
+
+    reconnectServer = startDaemon();
+    const screen = await reconnectServer.waitForText("Token URL", 15000);
+    reconnectBaseToken = extractTokenUrl(screen);
+  });
+
+  test.afterAll(async () => {
+    try { await reconnectServer?.close(); } catch {}
+    try { await reconnectPty?.close(); } catch {}
+  });
+
+  test("browser reattaches to the session after the daemon restarts", async ({ page }) => {
+    const sessionUrl = tokenWithSession(reconnectBaseToken, reconnectPty.name);
+
+    // Phase 1: attach + verify we have a working terminal.
+    await page.goto(sessionUrl);
+    await waitForTerminalText(page, "$");
+    await page.locator("#terminal-container").click();
+    await page.keyboard.type("echo before-restart-marker\n");
+    await waitForTerminalText(page, "before-restart-marker");
+
+    // Phase 2: kill the daemon and start a fresh one against the same
+    // config dir. Same encrypted store -> same Ed25519/Noise identity,
+    // same secret_hash, so the browser's existing client_token + url
+    // should pair against the new daemon transparently.
+    await reconnectServer.close();
+    // Brief gap so the kernel actually releases the port before we
+    // re-bind. Also exercises the case where the browser's first
+    // reconnect attempt fails because the daemon is still booting.
+    await new Promise((r) => setTimeout(r, 1500));
+    reconnectServer = startDaemon();
+    await reconnectServer.waitForText("Primary control connection", 15000);
+
+    // Phase 3: WITHOUT a manual page reload, the browser should auto
+    // reconnect, finish the Noise handshake, re-attach to the session,
+    // and respond to keystrokes again.
+    //
+    // We don't strictly need a long timeout — the reconnect schedule
+    // starts at 1s and tops out at 10s; with a freshly-up daemon,
+    // reattach typically lands within a few seconds.
+    await page.locator("#terminal-container").click({ timeout: 30_000 });
+    await page.keyboard.type("echo after-restart-marker\n");
+    await waitForTerminalText(page, "after-restart-marker", 30_000);
+  });
+});
