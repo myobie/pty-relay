@@ -2,6 +2,134 @@
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import sodium from "libsodium-wrappers-sumo";
+
+// browser/src/session-list-view.ts
+function shortenCwd(cwd) {
+  const home = "/Users/";
+  if (cwd.startsWith(home)) {
+    const after = cwd.slice(home.length).split("/");
+    if (after.length > 1) return "~/" + after.slice(1).join("/");
+  }
+  const parts = cwd.split("/").filter(Boolean);
+  if (parts.length > 2) return "\u2026/" + parts.slice(-2).join("/");
+  return cwd;
+}
+function formatTags(tags) {
+  if (!tags) return { inline: "", full: "", hasMore: false, total: 0 };
+  const entries = Object.entries(tags);
+  if (entries.length === 0) return { inline: "", full: "", hasMore: false, total: 0 };
+  const fmt = (k, v) => v && v !== "true" ? `#${k}=${v}` : `#${k}`;
+  const all = entries.map(([k, v]) => fmt(k, v));
+  const MAX_INLINE = 3;
+  if (all.length <= MAX_INLINE) {
+    return { inline: all.join(" "), full: all.join(" "), hasMore: false, total: all.length };
+  }
+  return {
+    inline: all.slice(0, MAX_INLINE).join(" "),
+    full: all.join(" "),
+    hasMore: true,
+    total: all.length
+  };
+}
+function renderSessionList(container, sessions, callbacks) {
+  container.replaceChildren();
+  const header = document.createElement("div");
+  header.className = "session-list-header";
+  for (const label of ["name", "cmd", "cwd", "tags"]) {
+    const span = document.createElement("span");
+    span.textContent = label;
+    header.appendChild(span);
+  }
+  container.appendChild(header);
+  if (sessions.length === 0) {
+    const empty = document.createElement("div");
+    empty.className = "session-row empty";
+    empty.textContent = "no running sessions";
+    container.appendChild(empty);
+  } else {
+    for (const s of sessions) {
+      container.appendChild(buildSessionRow(s, callbacks));
+    }
+  }
+  const newRow = document.createElement("div");
+  newRow.className = "session-row new-session-row";
+  const cta = document.createElement("span");
+  cta.className = "new-session-cta";
+  cta.textContent = "+ new session";
+  newRow.appendChild(cta);
+  newRow.addEventListener("click", () => callbacks.onSpawn());
+  container.appendChild(newRow);
+}
+function buildSessionRow(s, callbacks) {
+  const row = document.createElement("div");
+  row.className = "session-row";
+  const name = s.displayName || s.name;
+  const cmd = s.command || "";
+  const cwdShort = s.cwd ? shortenCwd(s.cwd) : "";
+  const tags = formatTags(s.tags);
+  const nameCell = makeCol("col-name", name);
+  nameCell.title = s.name;
+  row.appendChild(nameCell);
+  const cmdCell = makeCol("col-cmd", cmd);
+  cmdCell.title = cmd;
+  row.appendChild(cmdCell);
+  const cwdCell = makeCol("col-cwd", cwdShort);
+  cwdCell.title = s.cwd || "";
+  row.appendChild(cwdCell);
+  const tagsCell = document.createElement("span");
+  tagsCell.className = "col col-tags";
+  if (tags.hasMore) {
+    const inline = document.createElement("span");
+    inline.className = "tag-inline";
+    inline.textContent = tags.inline;
+    tagsCell.appendChild(inline);
+    tagsCell.appendChild(document.createTextNode(" "));
+    const more = document.createElement("span");
+    more.className = "tag-more";
+    more.textContent = `+${tags.total - 3}`;
+    tagsCell.appendChild(more);
+  } else {
+    const single = document.createElement("span");
+    single.textContent = tags.inline;
+    tagsCell.appendChild(single);
+  }
+  row.appendChild(tagsCell);
+  row.addEventListener("click", (e) => {
+    const target = e.target;
+    if (target.classList.contains("tag-more")) {
+      e.stopPropagation();
+      const expanded = row.classList.toggle("expanded");
+      const tagsEl = row.querySelector(".col-tags");
+      if (tagsEl) {
+        if (expanded) {
+          tagsEl.replaceChildren(document.createTextNode(tags.full));
+        } else {
+          tagsEl.replaceChildren();
+          const inline = document.createElement("span");
+          inline.className = "tag-inline";
+          inline.textContent = tags.inline;
+          tagsEl.appendChild(inline);
+          tagsEl.appendChild(document.createTextNode(" "));
+          const more = document.createElement("span");
+          more.className = "tag-more";
+          more.textContent = `+${tags.total - 3}`;
+          tagsEl.appendChild(more);
+        }
+      }
+      return;
+    }
+    callbacks.onAttach(s.name);
+  });
+  return row;
+}
+function makeCol(extraClass, text) {
+  const el = document.createElement("span");
+  el.className = `col ${extraClass}`;
+  el.textContent = text;
+  return el;
+}
+
+// browser/src/main.ts
 var MSG_DATA = 0;
 var MSG_DETACH = 2;
 var MSG_RESIZE = 3;
@@ -458,7 +586,7 @@ function handleDecryptedMessage(plaintext) {
         }
         return;
       } else if (msg.type === "sessions") {
-        renderSessionList(msg.sessions);
+        renderSessionList2(msg.sessions);
         return;
       } else if (msg.type === "error") {
         showStatus(`Error: ${msg.message}`);
@@ -494,85 +622,21 @@ function spawnSession(name, cwd) {
   if (cwd) msg.cwd = cwd;
   sendJson(msg);
 }
-function shortenCwd(cwd) {
-  const home = "/Users/";
-  if (cwd.startsWith(home)) {
-    const after = cwd.slice(home.length).split("/");
-    if (after.length > 1) return "~/" + after.slice(1).join("/");
-  }
-  const parts = cwd.split("/").filter(Boolean);
-  if (parts.length > 2) return "\u2026/" + parts.slice(-2).join("/");
-  return cwd;
-}
-function formatTags(tags) {
-  if (!tags) return { inline: "", full: "", hasMore: false };
-  const entries = Object.entries(tags);
-  if (entries.length === 0) return { inline: "", full: "", hasMore: false };
-  const fmt = (k, v) => v && v !== "true" ? `#${k}=${v}` : `#${k}`;
-  const all = entries.map(([k, v]) => fmt(k, v));
-  const MAX_INLINE = 3;
-  if (all.length <= MAX_INLINE) {
-    return { inline: all.join(" "), full: all.join(" "), hasMore: false };
-  }
-  return {
-    inline: all.slice(0, MAX_INLINE).join(" ") + ` +${all.length - MAX_INLINE}`,
-    full: all.join(" "),
-    hasMore: true
-  };
-}
-function renderSessionList(sessions) {
-  sessionsContainer.innerHTML = "";
-  const header = document.createElement("div");
-  header.className = "session-list-header";
-  header.innerHTML = `<span>name</span><span>cmd</span><span>cwd</span><span>tags</span>`;
-  sessionsContainer.appendChild(header);
-  if (sessions.length === 0) {
-    const empty = document.createElement("div");
-    empty.className = "session-row empty";
-    empty.textContent = "no running sessions";
-    sessionsContainer.appendChild(empty);
-  } else {
-    for (const s of sessions) {
-      const row = document.createElement("div");
-      row.className = "session-row";
-      const name = s.displayName || s.name;
-      const cmd = s.command || "";
-      const cwd = s.cwd ? shortenCwd(s.cwd) : "";
-      const tags = formatTags(s.tags);
-      const tagsHtml = tags.hasMore ? `<span class="tag-inline">${escHtml(tags.inline.replace(/ \+\d+$/, ""))}</span> <span class="tag-more" data-full="${escHtml(tags.full)}">+${tags.full.split(" ").length - 3}</span>` : `<span>${escHtml(tags.inline)}</span>`;
-      row.innerHTML = `<span class="col col-name" title="${escHtml(s.name)}">${escHtml(name)}</span><span class="col col-cmd" title="${escHtml(cmd)}">${escHtml(cmd)}</span><span class="col col-cwd" title="${escHtml(s.cwd || "")}">${escHtml(cwd)}</span><span class="col col-tags">${tagsHtml}</span>`;
-      row.addEventListener("click", (e) => {
-        const target = e.target;
-        if (target.classList.contains("tag-more")) {
-          e.stopPropagation();
-          row.classList.toggle("expanded");
-          const tagsCell = row.querySelector(".col-tags");
-          if (tagsCell) tagsCell.textContent = tags.full;
-          return;
-        }
-        const cols = Math.floor(terminalContainer.clientWidth / 9) || 80;
-        const rows = Math.floor(terminalContainer.clientHeight / 17) || 24;
-        attachToSession(s.name, cols, rows);
-      });
-      sessionsContainer.appendChild(row);
+function renderSessionList2(sessions) {
+  renderSessionList(sessionsContainer, sessions, {
+    onAttach: (name) => {
+      const cols = Math.floor(terminalContainer.clientWidth / 9) || 80;
+      const rows = Math.floor(terminalContainer.clientHeight / 17) || 24;
+      attachToSession(name, cols, rows);
+    },
+    onSpawn: () => {
+      const name = prompt("Session name:", `shell-${Date.now() % 1e4}`);
+      if (!name) return;
+      const cwd = prompt("Working directory:", "~");
+      spawnSession(name.trim(), cwd && cwd !== "~" ? cwd : void 0);
     }
-  }
-  const newRow = document.createElement("div");
-  newRow.className = "session-row";
-  newRow.innerHTML = `<span class="new-session-cta">+ new session</span>`;
-  newRow.addEventListener("click", () => {
-    const name = prompt("Session name:", `shell-${Date.now() % 1e4}`);
-    if (!name) return;
-    const cwd = prompt("Working directory:", "~");
-    spawnSession(name.trim(), cwd && cwd !== "~" ? cwd : void 0);
   });
-  sessionsContainer.appendChild(newRow);
   showView("sessions");
-}
-function escHtml(s) {
-  const el = document.createElement("span");
-  el.textContent = s;
-  return el.innerHTML;
 }
 detachBtn.addEventListener("click", () => {
   if (sessionAttached) sendPtyPacket(makeDetach());

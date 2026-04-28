@@ -630,14 +630,10 @@ function handleDecryptedMessage(plaintext: Uint8Array): void {
   }
 }
 
-interface SessionMeta {
-  name: string;
-  status?: string;
-  displayName?: string;
-  command?: string;
-  cwd?: string;
-  tags?: Record<string, string>;
-}
+import {
+  renderSessionList as renderSessionListView,
+  type SessionMeta,
+} from "./session-list-view.ts";
 
 function spawnSession(name: string, cwd?: string): void {
   showStatus("Starting session...");
@@ -646,117 +642,21 @@ function spawnSession(name: string, cwd?: string): void {
   sendJson(msg);
 }
 
-/** Show ~/foo for paths under HOME, otherwise show the last 2 segments
- *  preceded by an ellipsis. Long absolute cwds are unreadable in a
- *  fixed column; this preserves the most useful tail. */
-function shortenCwd(cwd: string): string {
-  const home = "/Users/"; // best-effort; we don't get HOME from the daemon.
-  if (cwd.startsWith(home)) {
-    const after = cwd.slice(home.length).split("/");
-    if (after.length > 1) return "~/" + after.slice(1).join("/");
-  }
-  const parts = cwd.split("/").filter(Boolean);
-  if (parts.length > 2) return "…/" + parts.slice(-2).join("/");
-  return cwd;
-}
-
-function formatTags(tags: Record<string, string> | undefined): {
-  inline: string;
-  full: string;
-  hasMore: boolean;
-} {
-  if (!tags) return { inline: "", full: "", hasMore: false };
-  const entries = Object.entries(tags);
-  if (entries.length === 0) return { inline: "", full: "", hasMore: false };
-  const fmt = (k: string, v: string) =>
-    v && v !== "true" ? `#${k}=${v}` : `#${k}`;
-  const all = entries.map(([k, v]) => fmt(k, v));
-  const MAX_INLINE = 3;
-  if (all.length <= MAX_INLINE) {
-    return { inline: all.join(" "), full: all.join(" "), hasMore: false };
-  }
-  return {
-    inline: all.slice(0, MAX_INLINE).join(" ") + ` +${all.length - MAX_INLINE}`,
-    full: all.join(" "),
-    hasMore: true,
-  };
-}
-
 function renderSessionList(sessions: SessionMeta[]): void {
-  sessionsContainer.innerHTML = "";
-
-  // Column header — TUI-style, four fixed columns.
-  const header = document.createElement("div");
-  header.className = "session-list-header";
-  header.innerHTML =
-    `<span>name</span><span>cmd</span><span>cwd</span><span>tags</span>`;
-  sessionsContainer.appendChild(header);
-
-  if (sessions.length === 0) {
-    const empty = document.createElement("div");
-    empty.className = "session-row empty";
-    empty.textContent = "no running sessions";
-    sessionsContainer.appendChild(empty);
-  } else {
-    for (const s of sessions) {
-      const row = document.createElement("div");
-      row.className = "session-row";
-      const name = s.displayName || s.name;
-      const cmd = s.command || "";
-      const cwd = s.cwd ? shortenCwd(s.cwd) : "";
-      const tags = formatTags(s.tags);
-
-      const tagsHtml = tags.hasMore
-        ? `<span class="tag-inline">${escHtml(tags.inline.replace(/ \+\d+$/, ""))}</span> <span class="tag-more" data-full="${escHtml(tags.full)}">+${tags.full.split(" ").length - 3}</span>`
-        : `<span>${escHtml(tags.inline)}</span>`;
-
-      row.innerHTML =
-        `<span class="col col-name" title="${escHtml(s.name)}">${escHtml(name)}</span>` +
-        `<span class="col col-cmd" title="${escHtml(cmd)}">${escHtml(cmd)}</span>` +
-        `<span class="col col-cwd" title="${escHtml(s.cwd || "")}">${escHtml(cwd)}</span>` +
-        `<span class="col col-tags">${tagsHtml}</span>`;
-
-      // Row click: attach. Tag-more click: expand inline (don't bubble
-      // up to the row click handler — the user wanted to *see* the
-      // value, not jump into the session).
-      row.addEventListener("click", (e) => {
-        const target = e.target as HTMLElement;
-        if (target.classList.contains("tag-more")) {
-          e.stopPropagation();
-          row.classList.toggle("expanded");
-          const tagsCell = row.querySelector(".col-tags") as HTMLElement | null;
-          if (tagsCell) tagsCell.textContent = tags.full;
-          return;
-        }
-        const cols = Math.floor(terminalContainer.clientWidth / 9) || 80;
-        const rows = Math.floor(terminalContainer.clientHeight / 17) || 24;
-        attachToSession(s.name, cols, rows);
-      });
-      sessionsContainer.appendChild(row);
-    }
-  }
-
-  // "+ new session" goes BELOW the listing, not above. It's an action,
-  // not a session, and putting it at the top forced the eye over a
-  // call-to-action before the actual content.
-  const newRow = document.createElement("div");
-  newRow.className = "session-row";
-  newRow.innerHTML = `<span class="new-session-cta">+ new session</span>`;
-  newRow.addEventListener("click", () => {
-    const name = prompt("Session name:", `shell-${Date.now() % 1e4}`);
-    if (!name) return;
-    const cwd = prompt("Working directory:", "~");
-    spawnSession(name.trim(), cwd && cwd !== "~" ? cwd : undefined);
+  renderSessionListView(sessionsContainer, sessions, {
+    onAttach: (name) => {
+      const cols = Math.floor(terminalContainer.clientWidth / 9) || 80;
+      const rows = Math.floor(terminalContainer.clientHeight / 17) || 24;
+      attachToSession(name, cols, rows);
+    },
+    onSpawn: () => {
+      const name = prompt("Session name:", `shell-${Date.now() % 1e4}`);
+      if (!name) return;
+      const cwd = prompt("Working directory:", "~");
+      spawnSession(name.trim(), cwd && cwd !== "~" ? cwd : undefined);
+    },
   });
-  sessionsContainer.appendChild(newRow);
-
   showView("sessions");
-}
-
-function escHtml(s: string): string {
-  const el = document.createElement("span");
-  el.textContent = s;
-  return el.innerHTML;
 }
 
 detachBtn.addEventListener("click", () => {

@@ -7,3 +7,8 @@ test-results/
 .claude/
 pty.toml
 .claude-session-id
+
+# throwaway dev probes (screenshots, latency harnesses, etc.)
+.overview-shots/
+.overview-shot.mjs
+.resize-probe.mjs

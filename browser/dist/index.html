@@ -36,7 +36,23 @@
       flex-direction: column;
     }
 
-    /* --- Session List (TUI-style) --- */
+    /* --- Session List (TUI-style) ---
+       Design notes:
+       - Rows have real vertical breathing room (8px top/bottom). Tight
+         rows scan poorly; this is a directory you read, not a packed
+         data table.
+       - Borders are #222 (solid) so the eye actually lands between
+         rows. The previous dotted #1a1a1a was invisible against the
+         #0a0a0a body.
+       - The tags cell is its own flex row so the "+N" pill is
+         shrink:0 and always visible, even when the inline tags
+         overflow.
+       - Hover effects are gated to `(hover: hover)` so touch devices
+         don't get sticky-tap-state lingering on the last row touched.
+       - Below 720px we collapse the grid into a two-line stacked
+         layout per row — at phone widths a four-column grid forces
+         every cell to truncate to a few characters.
+    */
     #session-list {
       display: none;
       flex-direction: column;
@@ -48,52 +64,102 @@
     }
     #session-list h1 {
       font-size: 11px;
-      margin-bottom: 8px;
-      color: var(--accent);
+      margin-bottom: 12px;
+      color: #555;
       text-transform: uppercase;
       letter-spacing: 1px;
       font-weight: normal;
     }
+    #session-list h1::before {
+      content: "// ";
+      color: #2a2a2a;
+    }
     .session-list-header {
       display: grid;
-      grid-template-columns: 1fr 1.4fr 1.6fr 1.4fr;
-      gap: 1.5ch;
-      padding: 4px 0;
+      grid-template-columns: 18ch 16ch minmax(20ch, 1fr) minmax(20ch, 1.4fr);
+      gap: 2ch;
+      padding: 6px 8px;
       color: #555;
       text-transform: uppercase;
       letter-spacing: 0.5px;
       font-size: 11px;
-      border-bottom: 1px dashed #2a2a2a;
+      border-bottom: 1px solid #2a2a2a;
     }
     .session-row {
       display: grid;
-      grid-template-columns: 1fr 1.4fr 1.6fr 1.4fr;
-      gap: 1.5ch;
-      padding: 4px 0;
+      grid-template-columns: 18ch 16ch minmax(20ch, 1fr) minmax(20ch, 1.4fr);
+      gap: 2ch;
+      padding: 8px;
       cursor: pointer;
       color: #ccc;
-      border-bottom: 1px dotted #1a1a1a;
+      border-bottom: 1px solid #161616;
+      position: relative;
+      transition: background 80ms linear;
     }
-    .session-row:hover { background: #111; }
+    /* Leading scan marker — a faint dot in the gutter so the eye has
+       something to land on per row. Pure decoration; doesn't take
+       layout space. */
+    .session-row::before {
+      content: "·";
+      color: #333;
+      position: absolute;
+      left: -10px;
+      top: 8px;
+    }
     .session-row .col {
       overflow: hidden;
       text-overflow: ellipsis;
       white-space: nowrap;
+      min-width: 0;
     }
     .session-row .col-name { color: #e0e0e0; }
     .session-row .col-cmd { color: #aaa; }
     .session-row .col-cwd { color: #888; }
-    .session-row .col-tags { color: #6da; }
-    .session-row .tag { margin-right: 1ch; }
-    .session-row .tag-more {
+    /* Tags cell is its own flex row so the "+N" pill is shrink-proof. */
+    .session-row .col-tags {
+      color: #6da;
+      display: flex;
+      align-items: center;
+      gap: 1ch;
+    }
+    .session-row .col-tags .tag-inline {
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      min-width: 0;
+      flex: 1 1 auto;
+    }
+    .session-row .col-tags .tag-more {
+      flex: 0 0 auto;
       color: var(--accent);
       cursor: pointer;
-      text-decoration: underline dotted;
+      padding: 0 6px;
+      border: 1px solid #234;
+      border-radius: 2px;
+      font-size: 11px;
+    }
+    @media (hover: hover) {
+      .session-row:hover { background: #111; }
+      .session-row:hover::before { color: var(--accent); }
+      .session-row .col-tags .tag-more:hover {
+        background: #1a2433;
+        border-color: var(--accent);
+      }
     }
     .session-row.expanded { background: #0d0d0d; }
-    .session-row.expanded .col {
+    .session-row.expanded .col-tags {
+      flex-wrap: wrap;
+    }
+    .session-row.expanded .col-tags .tag-inline {
       white-space: normal;
       overflow: visible;
+    }
+    .session-row.new-session-row {
+      border-bottom: 0;
+      margin-top: 4px;
+    }
+    .session-row.new-session-row::before {
+      content: none;
     }
     .session-row .new-session-cta {
       grid-column: 1 / -1;
@@ -105,6 +171,43 @@
       color: #666;
       cursor: default;
       font-style: italic;
+    }
+    .session-row.empty::before { content: none; }
+
+    /* Phone widths: stack each row into two lines so we can fit
+       readable values instead of 6-character truncations. */
+    @media (max-width: 720px) {
+      .session-list-header { display: none; }
+      .session-row {
+        grid-template-columns: 1fr auto;
+        grid-template-rows: auto auto;
+        gap: 4px 1ch;
+        padding: 10px 8px;
+      }
+      .session-row .col-name {
+        grid-row: 1;
+        grid-column: 1;
+        font-weight: bold;
+      }
+      .session-row .col-cmd {
+        grid-row: 1;
+        grid-column: 2;
+        text-align: right;
+      }
+      .session-row .col-cwd {
+        grid-row: 2;
+        grid-column: 1 / -1;
+        font-size: 11px;
+      }
+      .session-row .col-tags {
+        grid-row: 3;
+        grid-column: 1 / -1;
+        font-size: 11px;
+      }
+      .session-row.empty,
+      .session-row.new-session-row {
+        grid-template-columns: 1fr;
+      }
     }
 
     /* --- Terminal --- */
