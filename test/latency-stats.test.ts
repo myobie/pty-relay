@@ -210,6 +210,76 @@ describe("formatSummary", () => {
   });
 });
 
+describe("recordRecv + WS frame stats", () => {
+  it("captures one entry per recordRecv call with the supplied byte size", () => {
+    const term = makeFakeTerm();
+    tracker = createLatencyTracker(term);
+    tracker.recordRecv(64);
+    now += 50;
+    tracker.recordRecv(128);
+    now += 30;
+    tracker.recordRecv(32);
+    const r = tracker.report();
+    expect(r.ws.count).toBe(3);
+    expect(r.ws.sizes).toEqual([64, 128, 32]);
+  });
+
+  it("inter-arrival deltas have count - 1 entries (no leading zero)", () => {
+    const term = makeFakeTerm();
+    tracker = createLatencyTracker(term);
+    tracker.recordRecv(10); // arrival 0
+    now += 100;
+    tracker.recordRecv(10); // arrival 1, +100ms
+    now += 50;
+    tracker.recordRecv(10); // arrival 2, +50ms
+    const r = tracker.report();
+    expect(r.ws.interArrivalMs).toEqual([100, 50]);
+  });
+
+  it("reset() clears WS frame state too", () => {
+    const term = makeFakeTerm();
+    tracker = createLatencyTracker(term);
+    tracker.recordRecv(10);
+    tracker.recordRecv(20);
+    expect(tracker.report().ws.count).toBe(2);
+    tracker.reset();
+    expect(tracker.report().ws.count).toBe(0);
+    expect(tracker.report().ws.sizes).toEqual([]);
+  });
+
+  it("WS frame ring-buffer is independently capped at 200", () => {
+    const term = makeFakeTerm();
+    tracker = createLatencyTracker(term);
+    for (let i = 0; i < 250; i++) tracker.recordRecv(10);
+    expect(tracker.report().ws.count).toBe(200);
+  });
+});
+
+describe("report()", () => {
+  it("includes wall-clock startedAt/endedAt timestamps", () => {
+    const term = makeFakeTerm();
+    const t0 = Date.now();
+    tracker = createLatencyTracker(term);
+    const r = tracker.report();
+    expect(r.startedAt).toBeGreaterThanOrEqual(t0);
+    expect(r.endedAt).toBeGreaterThanOrEqual(r.startedAt);
+  });
+
+  it("composes keystroke summary + ws frame stats together", () => {
+    const term = makeFakeTerm();
+    tracker = createLatencyTracker(term);
+    term.emitData("a");
+    now += 50;
+    term.emitRender();
+    tracker.recordRecv(80);
+    const r = tracker.report();
+    expect(r.keystrokes.count).toBe(1);
+    expect(r.keystrokes.median).toBe(50);
+    expect(r.ws.count).toBe(1);
+    expect(r.ws.sizes).toEqual([80]);
+  });
+});
+
 describe("formatCompact", () => {
   it("returns n=0 with no samples", () => {
     expect(

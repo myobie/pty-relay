@@ -1,6 +1,7 @@
 import * as os from "node:os";
 import * as path from "node:path";
 import * as fs from "node:fs";
+import { defaultConfigDir } from "../storage/bootstrap.ts";
 import { createRelayServer } from "../serve/server.ts";
 import { loadDaemonConfig, getTokenUrl, loadLabel } from "../relay/config.ts";
 import { PrimaryRelayConnection } from "../relay/primary-connection.ts";
@@ -151,6 +152,23 @@ export async function start(
         msg = JSON.parse(new TextDecoder().decode(plaintext));
       } catch {
         return false;
+      }
+
+      // Latency reports from the web UI's tracker. The browser sends
+      // a structured payload every 30s with keystroke samples + WS
+      // frame stats. We append one JSONL line per report to
+      // <configDir>/latency.jsonl so an operator can `tail -f` the
+      // file or post-process it offline. Best-effort: a failed write
+      // never breaks the session.
+      if (msg.type === "latency_report") {
+        const dir = configDir ?? defaultConfigDir();
+        const line = JSON.stringify({
+          ts: new Date().toISOString(),
+          clientId,
+          ...msg,
+        }) + "\n";
+        fs.appendFile(path.join(dir, "latency.jsonl"), line, () => {});
+        return true;
       }
 
       // Self-hosted-specific: hello's side effect is backfilling the

@@ -38,10 +38,44 @@ export interface LatencySummary {
   windowSec: number;
 }
 
+/** Per-WebSocket-frame metrics captured outside the xterm event loop.
+ *  Less polluted than render-based measurements — every binary frame
+ *  is a real network arrival from the daemon. We don't try to pair
+ *  these with specific keystrokes; consumers can correlate by index
+ *  or timestamp if they want. */
+export interface WsFrameStats {
+  count: number;
+  /** Bytes per frame across the window. */
+  sizes: number[];
+  /** Gaps between consecutive frame arrivals, in ms. The first frame
+   *  has no prior, so gaps.length === count - 1. */
+  interArrivalMs: number[];
+}
+
+/** A full structured report (keystroke samples + WS frame samples).
+ *  Snapshot-able, JSON-stringifiable; flushed to the daemon
+ *  periodically to be appended to a JSONL log on disk. */
+export interface LatencyReport {
+  /** ms since unix epoch — wall-clock for log correlation. */
+  startedAt: number;
+  endedAt: number;
+  /** Round-trip key-to-render samples, FIFO-matched (see module docs
+   *  for caveats about burst inflation). */
+  keystrokes: LatencySummary;
+  ws: WsFrameStats;
+}
+
 export interface LatencyTracker {
   /** Snapshot the current rolling window. */
   summary(): LatencySummary;
-  /** Drop all samples + pending. Call when attaching to a new session. */
+  /** Build a structured report covering the current window — used by
+   *  the auto-flush path that ships data to the daemon. */
+  report(): LatencyReport;
+  /** Note an incoming WebSocket binary frame. Caller passes byte
+   *  length. The tracker timestamps internally. */
+  recordRecv(bytes: number): void;
+  /** Drop all samples + pending. Call after a successful flush so
+   *  each report covers a disjoint window. */
   reset(): void;
   /** Tear down event listeners. Returned by the factory's startup. */
   destroy(): void;
@@ -57,11 +91,18 @@ export interface TermLike {
 }
 
 const SAMPLE_CAP = 200;
+const WS_FRAME_CAP = 200;
 
 export function createLatencyTracker(term: TermLike): LatencyTracker {
   const pending: number[] = []; // queue of sentAt timestamps
   const samples: number[] = []; // ring of completed roundtrip ms
+  // WS frame metrics: parallel arrays so a single push() at recv time
+  // touches both. We keep raw arrival timestamps so the inter-arrival
+  // computation is consistent regardless of when reset() was called.
+  const wsArrivals: number[] = []; // performance.now() per arrival
+  const wsSizes: number[] = []; // bytes per arrival
   let trackerStartedAt = performance.now();
+  let trackerStartedAtMs = Date.now();
 
   const onDataDisposer = term.onData((data: string) => {
     const now = performance.now();
@@ -79,40 +120,77 @@ export function createLatencyTracker(term: TermLike): LatencyTracker {
     if (samples.length > SAMPLE_CAP) samples.shift();
   });
 
-  return {
-    summary(): LatencySummary {
-      if (samples.length === 0) {
-        return {
-          count: 0,
-          pending: pending.length,
-          min: 0,
-          median: 0,
-          p95: 0,
-          max: 0,
-          samples: [],
-          windowSec: (performance.now() - trackerStartedAt) / 1000,
-        };
-      }
-      const sorted = samples.slice().sort((a, b) => a - b);
-      // Nearest-rank percentile: ceil(n*p) - 1, clamped to [0, n-1].
-      // For n=10, p=0.5 → idx 4 (the 5th value); p=0.95 → idx 9.
-      const pct = (p: number) =>
-        sorted[Math.max(0, Math.min(sorted.length - 1, Math.ceil(sorted.length * p) - 1))];
+  function summaryNow(): LatencySummary {
+    if (samples.length === 0) {
       return {
-        count: samples.length,
+        count: 0,
         pending: pending.length,
-        min: round1(sorted[0]),
-        median: round1(pct(0.5)),
-        p95: round1(pct(0.95)),
-        max: round1(sorted[sorted.length - 1]),
-        samples: samples.slice(),
+        min: 0,
+        median: 0,
+        p95: 0,
+        max: 0,
+        samples: [],
         windowSec: round1((performance.now() - trackerStartedAt) / 1000),
       };
+    }
+    const sorted = samples.slice().sort((a, b) => a - b);
+    // Nearest-rank percentile: ceil(n*p) - 1, clamped to [0, n-1].
+    // For n=10, p=0.5 → idx 4 (the 5th value); p=0.95 → idx 9.
+    const pct = (p: number) =>
+      sorted[Math.max(0, Math.min(sorted.length - 1, Math.ceil(sorted.length * p) - 1))];
+    return {
+      count: samples.length,
+      pending: pending.length,
+      min: round1(sorted[0]),
+      median: round1(pct(0.5)),
+      p95: round1(pct(0.95)),
+      max: round1(sorted[sorted.length - 1]),
+      samples: samples.slice(),
+      windowSec: round1((performance.now() - trackerStartedAt) / 1000),
+    };
+  }
+
+  function wsStatsNow(): WsFrameStats {
+    const interArrival: number[] = [];
+    for (let i = 1; i < wsArrivals.length; i++) {
+      interArrival.push(round1(wsArrivals[i] - wsArrivals[i - 1]));
+    }
+    return {
+      count: wsArrivals.length,
+      sizes: wsSizes.slice(),
+      interArrivalMs: interArrival,
+    };
+  }
+
+  return {
+    summary: summaryNow,
+    report(): LatencyReport {
+      return {
+        startedAt: trackerStartedAtMs,
+        endedAt: Date.now(),
+        keystrokes: summaryNow(),
+        ws: wsStatsNow(),
+      };
+    },
+    recordRecv(bytes: number): void {
+      const now = performance.now();
+      wsArrivals.push(now);
+      wsSizes.push(bytes);
+      // Cap independently of keystroke samples — programs that emit a
+      // lot of output can blow this past 200 quickly. Keep the most
+      // recent N so the report stays bounded.
+      if (wsArrivals.length > WS_FRAME_CAP) {
+        wsArrivals.shift();
+        wsSizes.shift();
+      }
     },
     reset() {
       pending.length = 0;
       samples.length = 0;
+      wsArrivals.length = 0;
+      wsSizes.length = 0;
       trackerStartedAt = performance.now();
+      trackerStartedAtMs = Date.now();
     },
     destroy() {
       onDataDisposer.dispose();

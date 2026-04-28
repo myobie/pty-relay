@@ -375,10 +375,14 @@ function makeCol(extraClass, text) {
 
 // browser/src/latency-stats.ts
 var SAMPLE_CAP = 200;
+var WS_FRAME_CAP = 200;
 function createLatencyTracker(term2) {
   const pending = [];
   const samples = [];
+  const wsArrivals = [];
+  const wsSizes = [];
   let trackerStartedAt = performance.now();
+  let trackerStartedAtMs = Date.now();
   const onDataDisposer = term2.onData((data) => {
     const now = performance.now();
     for (let i = 0; i < data.length; i++) pending.push(now);
@@ -390,37 +394,69 @@ function createLatencyTracker(term2) {
     samples.push(elapsed);
     if (samples.length > SAMPLE_CAP) samples.shift();
   });
-  return {
-    summary() {
-      if (samples.length === 0) {
-        return {
-          count: 0,
-          pending: pending.length,
-          min: 0,
-          median: 0,
-          p95: 0,
-          max: 0,
-          samples: [],
-          windowSec: (performance.now() - trackerStartedAt) / 1e3
-        };
-      }
-      const sorted = samples.slice().sort((a, b) => a - b);
-      const pct = (p) => sorted[Math.max(0, Math.min(sorted.length - 1, Math.ceil(sorted.length * p) - 1))];
+  function summaryNow() {
+    if (samples.length === 0) {
       return {
-        count: samples.length,
+        count: 0,
         pending: pending.length,
-        min: round1(sorted[0]),
-        median: round1(pct(0.5)),
-        p95: round1(pct(0.95)),
-        max: round1(sorted[sorted.length - 1]),
-        samples: samples.slice(),
+        min: 0,
+        median: 0,
+        p95: 0,
+        max: 0,
+        samples: [],
         windowSec: round1((performance.now() - trackerStartedAt) / 1e3)
       };
+    }
+    const sorted = samples.slice().sort((a, b) => a - b);
+    const pct = (p) => sorted[Math.max(0, Math.min(sorted.length - 1, Math.ceil(sorted.length * p) - 1))];
+    return {
+      count: samples.length,
+      pending: pending.length,
+      min: round1(sorted[0]),
+      median: round1(pct(0.5)),
+      p95: round1(pct(0.95)),
+      max: round1(sorted[sorted.length - 1]),
+      samples: samples.slice(),
+      windowSec: round1((performance.now() - trackerStartedAt) / 1e3)
+    };
+  }
+  function wsStatsNow() {
+    const interArrival = [];
+    for (let i = 1; i < wsArrivals.length; i++) {
+      interArrival.push(round1(wsArrivals[i] - wsArrivals[i - 1]));
+    }
+    return {
+      count: wsArrivals.length,
+      sizes: wsSizes.slice(),
+      interArrivalMs: interArrival
+    };
+  }
+  return {
+    summary: summaryNow,
+    report() {
+      return {
+        startedAt: trackerStartedAtMs,
+        endedAt: Date.now(),
+        keystrokes: summaryNow(),
+        ws: wsStatsNow()
+      };
+    },
+    recordRecv(bytes) {
+      const now = performance.now();
+      wsArrivals.push(now);
+      wsSizes.push(bytes);
+      if (wsArrivals.length > WS_FRAME_CAP) {
+        wsArrivals.shift();
+        wsSizes.shift();
+      }
     },
     reset() {
       pending.length = 0;
       samples.length = 0;
+      wsArrivals.length = 0;
+      wsSizes.length = 0;
       trackerStartedAt = performance.now();
+      trackerStartedAtMs = Date.now();
     },
     destroy() {
       onDataDisposer.dispose();
@@ -798,7 +834,9 @@ function bindTerminalTitle(t, fallbackName) {
 }
 var latencyTracker = null;
 var latencyTickHandle = null;
+var latencyReportHandle = null;
 var LATENCY_TICK_MS = 1e3;
+var LATENCY_REPORT_INTERVAL_MS = 3e4;
 function bindLatencyTracker(t) {
   if (latencyTracker) latencyTracker.destroy();
   latencyTracker = createLatencyTracker(t);
@@ -810,11 +848,34 @@ function bindLatencyTracker(t) {
     latencyStatEl.classList.toggle("warn", s.count > 0 && s.median >= 60);
     latencyStatEl.classList.toggle("bad", s.count > 0 && s.median >= 120);
   }, LATENCY_TICK_MS);
+  if (latencyReportHandle) clearInterval(latencyReportHandle);
+  latencyReportHandle = setInterval(() => {
+    if (!latencyTracker || !sessionAttached || !transport) return;
+    const r = latencyTracker.report();
+    if (r.keystrokes.count === 0 && r.ws.count === 0) return;
+    const payload = {
+      type: "latency_report",
+      report: r,
+      ua: navigator.userAgent,
+      viewport: { w: window.innerWidth, h: window.innerHeight },
+      relay: token ? `${location.protocol}//${token.host}` : null,
+      session: currentSession
+    };
+    try {
+      sendJson(payload);
+      latencyTracker.reset();
+    } catch {
+    }
+  }, LATENCY_REPORT_INTERVAL_MS);
 }
 function teardownLatencyTracker() {
   if (latencyTickHandle) {
     clearInterval(latencyTickHandle);
     latencyTickHandle = null;
+  }
+  if (latencyReportHandle) {
+    clearInterval(latencyReportHandle);
+    latencyReportHandle = null;
   }
   if (latencyTracker) {
     latencyTracker.destroy();
@@ -1391,6 +1452,7 @@ function connectToRelay() {
         }
       } else {
         const data = new Uint8Array(event.data);
+        if (latencyTracker) latencyTracker.recordRecv(data.length);
         if (!handshakeComplete) {
           try {
             transport = handshake.readWelcome(data);

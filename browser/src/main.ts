@@ -475,9 +475,18 @@ function bindTerminalTitle(t: Terminal, fallbackName: string): void {
 // constructed (attach or spawn paths) and torn down on detach.
 // Refreshes the toolbar's compact "n=42 p50=38ms p95=72ms" indicator
 // on a tick; "Stats" button copies the full breakdown.
+//
+// Auto-flush: every LATENCY_REPORT_INTERVAL_MS we ship a structured
+// report to the daemon (via the existing encrypted control channel)
+// which appends it as a JSONL line at <configDir>/latency.jsonl. Then
+// the tracker is reset so each report covers a disjoint window. Only
+// flush if the tunnel is fully ready AND we have something worth
+// reporting (>0 keystrokes OR >0 frames).
 let latencyTracker: LatencyTracker | null = null;
 let latencyTickHandle: ReturnType<typeof setInterval> | null = null;
+let latencyReportHandle: ReturnType<typeof setInterval> | null = null;
 const LATENCY_TICK_MS = 1000;
+const LATENCY_REPORT_INTERVAL_MS = 30_000;
 
 function bindLatencyTracker(t: Terminal): void {
   if (latencyTracker) latencyTracker.destroy();
@@ -490,12 +499,37 @@ function bindLatencyTracker(t: Terminal): void {
     latencyStatEl.classList.toggle("warn", s.count > 0 && s.median >= 60);
     latencyStatEl.classList.toggle("bad", s.count > 0 && s.median >= 120);
   }, LATENCY_TICK_MS);
+  if (latencyReportHandle) clearInterval(latencyReportHandle);
+  latencyReportHandle = setInterval(() => {
+    if (!latencyTracker || !sessionAttached || !transport) return;
+    const r = latencyTracker.report();
+    if (r.keystrokes.count === 0 && r.ws.count === 0) return;
+    const payload = {
+      type: "latency_report",
+      report: r,
+      ua: navigator.userAgent,
+      viewport: { w: window.innerWidth, h: window.innerHeight },
+      relay: token ? `${location.protocol}//${token.host}` : null,
+      session: currentSession,
+    };
+    try {
+      sendJson(payload);
+      latencyTracker.reset();
+    } catch {
+      // If the send fails (transport torn down between checks etc.)
+      // hold onto the data and try again next interval.
+    }
+  }, LATENCY_REPORT_INTERVAL_MS);
 }
 
 function teardownLatencyTracker(): void {
   if (latencyTickHandle) {
     clearInterval(latencyTickHandle);
     latencyTickHandle = null;
+  }
+  if (latencyReportHandle) {
+    clearInterval(latencyReportHandle);
+    latencyReportHandle = null;
   }
   if (latencyTracker) {
     latencyTracker.destroy();
@@ -1145,6 +1179,12 @@ function connectToRelay(): void {
         } catch {}
       } else {
         const data = new Uint8Array(event.data as ArrayBuffer);
+        // Tell the latency tracker about every binary frame from the
+        // daemon — used for the WS-frame stats in periodic reports.
+        // We do this BEFORE parsing so the timestamp is the earliest
+        // moment we knew bytes arrived. Pre-handshake frames count
+        // too (the welcome frame is informative).
+        if (latencyTracker) latencyTracker.recordRecv(data.length);
         if (!handshakeComplete) {
           try {
             transport = handshake.readWelcome(data);
