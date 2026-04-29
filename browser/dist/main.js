@@ -1446,6 +1446,11 @@ function setKbMode(mode) {
   if (mode === "panel") document.activeElement?.blur();
   if (mode === "text") {
     textInput.focus({ preventScroll: true });
+    requestAnimationFrame(() => {
+      window.scrollTo(0, 0);
+      document.documentElement.scrollTop = 0;
+      document.body.scrollTop = 0;
+    });
   }
   if (mode === "bar" && term) term.focus();
   updateVh();
@@ -1573,7 +1578,7 @@ textSendBtn.addEventListener("click", () => {
   }
 });
 textInput.addEventListener("keydown", (e) => {
-  if (e.key === "Enter") {
+  if (e.key === "Enter" && !e.shiftKey && !e.metaKey && !e.ctrlKey && !e.altKey) {
     e.preventDefault();
     textSendBtn.click();
   }

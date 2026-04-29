@@ -398,8 +398,11 @@
       display: none;
       padding: 6px;
       gap: 6px;
+      /* Align bottom so the buttons stay anchored to the bottom of
+         the bar as the textarea grows upward to its max-height. */
+      align-items: flex-end;
     }
-    #text-input-bar input {
+    #text-input-bar textarea {
       flex: 1;
       background: #1a1a1a;
       color: var(--fg);
@@ -410,6 +413,17 @@
          Pin to 16px so the zoom-in animation doesn't fire. */
       font-size: 16px;
       outline: none;
+      resize: none;
+      /* Auto-grow up to 3 lines, then scroll inside the textarea.
+         field-sizing: content lets the box size to its content
+         (Chrome 123+, Safari 17.4+). The fallback path (older
+         browsers) just stays at the rows="1" min-height. */
+      font-family: inherit;
+      line-height: 1.4;
+      field-sizing: content;
+      min-height: calc(1em * 1.4 + 12px);
+      max-height: calc(3em * 1.4 + 12px);
+      overflow-y: auto;
     }
     #text-input-bar button {
       background: var(--accent);
@@ -470,9 +484,9 @@
       <div id="quick-bar"></div>
       <div id="key-panel"></div>
       <div id="text-input-bar">
-        <input type="text" id="text-input" autocorrect="on" autocapitalize="sentences" placeholder="Type command...">
+        <textarea id="text-input" rows="1" autocorrect="on" autocapitalize="sentences" placeholder="Type..."></textarea>
         <button id="text-send-btn">Send</button>
-        <button id="text-back-btn" class="kb-btn">Bar</button>
+        <button id="text-back-btn" class="kb-btn">←</button>
       </div>
     </div>
   </div>

@@ -978,7 +978,7 @@ detachBtn.addEventListener("click", () => {
 const quickBar = document.getElementById("quick-bar")!;
 const keyPanel = document.getElementById("key-panel")!;
 const textInputBar = document.getElementById("text-input-bar")!;
-const textInput = document.getElementById("text-input") as HTMLInputElement;
+const textInput = document.getElementById("text-input") as HTMLTextAreaElement;
 const textSendBtn = document.getElementById("text-send-btn")!;
 const textBackBtn = document.getElementById("text-back-btn")!;
 const kbReopen = document.getElementById("kb-reopen")!;
@@ -1074,10 +1074,17 @@ function setKbMode(mode: "bar" | "panel" | "text" | "hidden"): void {
   kbReopen.style.display = mode === "hidden" ? "block" : "none";
   if (mode === "panel") (document.activeElement as HTMLElement | null)?.blur();
   if (mode === "text") {
-    // preventScroll stops iOS Safari from auto-scrolling the page to
-    // bring the input into view — without it, the page jumps around
-    // because our layout uses overflow:hidden + visualViewport vh.
+    // preventScroll handles the scrollIntoView part, but iOS Safari
+    // ALSO mutates document.scrollingElement.scrollTop to keep the
+    // input above the soft keyboard, which our overflow:hidden body
+    // can't prevent. Snap back to (0,0) on the next frame so the
+    // layout stays anchored.
     textInput.focus({ preventScroll: true });
+    requestAnimationFrame(() => {
+      window.scrollTo(0, 0);
+      document.documentElement.scrollTop = 0;
+      document.body.scrollTop = 0;
+    });
   }
   if (mode === "bar" && term) term.focus();
   updateVh();
@@ -1233,7 +1240,12 @@ textSendBtn.addEventListener("click", () => {
   }
 });
 textInput.addEventListener("keydown", (e: KeyboardEvent) => {
-  if (e.key === "Enter") {
+  // Plain Enter submits; Shift+Enter (or any modified Enter) inserts
+  // a newline naturally — this mirrors Claude Code / Codex / Cursor's
+  // chat-input convention. The submit path runs the bracketed-paste
+  // pipeline, so multiline input is sent as one paste + a single
+  // Return.
+  if (e.key === "Enter" && !e.shiftKey && !e.metaKey && !e.ctrlKey && !e.altKey) {
     e.preventDefault();
     (textSendBtn as HTMLButtonElement).click();
   }
