@@ -871,6 +871,10 @@ var packetParser = new PacketParser();
 var resizeObserver = null;
 var sessionAttached = false;
 var DEFAULT_DOC_TITLE = "pty relay";
+function setUrlSession(session) {
+  const newPath = session ? `/${encodeURIComponent(session)}` : "/";
+  history.replaceState(null, "", newPath + location.search + location.hash);
+}
 function bindTerminalTitle(t, fallbackName) {
   t.onTitleChange((title) => {
     document.title = title && title.length > 0 ? title : fallbackName;
@@ -972,6 +976,7 @@ function disconnect() {
 function attachToSession(sessionName, _cols, _rows) {
   currentSession = sessionName;
   sessionNameLabel.textContent = sessionName;
+  setUrlSession(sessionName);
   document.title = sessionName;
   showView("terminal");
   if (!term) {
@@ -1027,6 +1032,7 @@ function handleDecryptedMessage(plaintext) {
         currentSession = msg.session;
         sessionNameLabel.textContent = msg.session;
         document.title = msg.session;
+        setUrlSession(msg.session);
         showView("terminal");
         if (!term) {
           term = new Terminal({
@@ -1082,6 +1088,7 @@ function handleDecryptedMessage(plaintext) {
       case MSG_EXIT: {
         const code = pkt.payload.length >= 4 ? new DataView(pkt.payload.buffer, pkt.payload.byteOffset).getInt32(0, false) : -1;
         showStatus(`Session exited (code ${code})`);
+        setUrlSession(null);
         disconnect();
         break;
       }
@@ -1136,6 +1143,7 @@ detachBtn.addEventListener("click", () => {
   sessionAttached = false;
   currentSession = null;
   document.title = DEFAULT_DOC_TITLE;
+  setUrlSession(null);
   packetParser = new PacketParser();
   teardownLatencyTracker();
   if (term) {

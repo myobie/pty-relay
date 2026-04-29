@@ -463,6 +463,16 @@ const DEFAULT_DOC_TITLE = "pty relay";
  *  the browser tab reflects what a native terminal would show in its
  *  window title. Falls back to the session name if the program clears
  *  the title (empty OSC). */
+/** Update the URL's path to reflect the currently-attached session
+ *  (or clear it back to /). Uses history.replaceState — refresh
+ *  stays in the same session, but back button still does what the
+ *  user expects (no extra entries pushed into the history stack).
+ *  The fragment (which holds the secret) is preserved verbatim. */
+function setUrlSession(session: string | null): void {
+  const newPath = session ? `/${encodeURIComponent(session)}` : "/";
+  history.replaceState(null, "", newPath + location.search + location.hash);
+}
+
 function bindTerminalTitle(t: Terminal, fallbackName: string): void {
   t.onTitleChange((title) => {
     document.title = (title && title.length > 0) ? title : fallbackName;
@@ -587,6 +597,11 @@ function disconnect(): void {
 function attachToSession(sessionName: string, _cols: number, _rows: number): void {
   currentSession = sessionName;
   sessionNameLabel.textContent = sessionName;
+  // Stick the session into the URL so refresh keeps you here instead
+  // of dumping back to the overview. setUrlSession is replaceState
+  // (no history-stack entry) and preserves the fragment that holds
+  // the secret.
+  setUrlSession(sessionName);
   // Default tab title to the session name on attach. If the running
   // program emits OSC 0/2 we'll override via bindTerminalTitle below.
   document.title = sessionName;
@@ -649,6 +664,7 @@ function handleDecryptedMessage(plaintext: Uint8Array): void {
         currentSession = msg.session;
         sessionNameLabel.textContent = msg.session;
         document.title = msg.session;
+        setUrlSession(msg.session);
         showView("terminal");
         if (!term) {
           term = new Terminal({
@@ -706,6 +722,9 @@ function handleDecryptedMessage(plaintext: Uint8Array): void {
             ? new DataView(pkt.payload.buffer, pkt.payload.byteOffset).getInt32(0, false)
             : -1;
         showStatus(`Session exited (code ${code})`);
+        // Session is gone — strip it from the URL so a refresh
+        // doesn't try to reattach to a now-dead name.
+        setUrlSession(null);
         disconnect();
         break;
       }
@@ -783,6 +802,7 @@ detachBtn.addEventListener("click", () => {
   sessionAttached = false;
   currentSession = null;
   document.title = DEFAULT_DOC_TITLE;
+  setUrlSession(null);
   packetParser = new PacketParser();
   teardownLatencyTracker();
   if (term) {
