@@ -29,6 +29,7 @@ const vendorDir = path.join(here, "vendor");
 const EXTERNAL = [
   "@xterm/xterm",
   "@xterm/addon-fit",
+  "@xterm/addon-webgl",
   "libsodium-wrappers-sumo",
   "libsodium-sumo",
 ];

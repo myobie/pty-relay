@@ -1,6 +1,7 @@
 // browser/src/main.ts
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
+import { WebglAddon } from "@xterm/addon-webgl";
 import sodium from "libsodium-wrappers-sumo";
 
 // ../pty/src/tui/fuzzy.ts
@@ -895,6 +896,38 @@ function bindTerminalTitle(t, fallbackName) {
     document.title = title && title.length > 0 ? title : fallbackName;
   });
 }
+var TERMINAL_OPTIONS = {
+  cursorBlink: true,
+  fontSize: 14,
+  // Match the rest of the page's monospace stack. Without an
+  // explicit fontFamily xterm picks its own default (usually
+  // "courier-new"), which doesn't match the SF Mono / Menlo /
+  // etc. used everywhere else in the app.
+  fontFamily: "'SF Mono', 'Menlo', 'Consolas', 'Monaco', monospace",
+  // smoothScrollDuration was 80ms — animating scrolls felt
+  // sluggish for typing where every output line shifts the
+  // viewport. 0 disables the animation; xterm renders at the
+  // next RAF as before, but no easing layer on top.
+  smoothScrollDuration: 0,
+  theme: { background: "#0a0a0a" }
+};
+function loadWebglRenderer(t) {
+  function attach() {
+    let addon;
+    try {
+      addon = new WebglAddon();
+    } catch (err) {
+      console.warn("[pty-relay] WebGL renderer unavailable:", err);
+      return;
+    }
+    addon.onContextLoss(() => {
+      addon.dispose();
+      setTimeout(attach, 100);
+    });
+    t.loadAddon(addon);
+  }
+  attach();
+}
 var latencyTracker = null;
 var latencyTickHandle = null;
 var latencyReportHandle = null;
@@ -996,19 +1029,11 @@ function attachToSession(sessionName, _cols, _rows) {
   document.title = sessionName;
   showView("terminal");
   if (!term) {
-    term = new Terminal({
-      cursorBlink: true,
-      fontSize: 14,
-      // smoothScrollDuration was 80ms — animating scrolls felt
-      // sluggish for typing where every output line shifts the
-      // viewport. 0 disables the animation; xterm renders at the
-      // next RAF as before, but no easing layer on top.
-      smoothScrollDuration: 0,
-      theme: { background: "#0a0a0a" }
-    });
+    term = new Terminal(TERMINAL_OPTIONS);
     fitAddon = new FitAddon();
     term.loadAddon(fitAddon);
     term.open(terminalContainer);
+    loadWebglRenderer(term);
     fitAddon.fit();
     resizeObserver = new ResizeObserver(() => {
       if (fitAddon && term) fitAddon.fit();
@@ -1051,19 +1076,11 @@ function handleDecryptedMessage(plaintext) {
         setUrlSession(msg.session);
         showView("terminal");
         if (!term) {
-          term = new Terminal({
-            cursorBlink: true,
-            fontSize: 14,
-            // smoothScrollDuration was 80ms — animating scrolls felt
-            // sluggish for typing where every output line shifts the
-            // viewport. 0 disables the animation; xterm renders at the
-            // next RAF as before, but no easing layer on top.
-            smoothScrollDuration: 0,
-            theme: { background: "#0a0a0a" }
-          });
+          term = new Terminal(TERMINAL_OPTIONS);
           fitAddon = new FitAddon();
           term.loadAddon(fitAddon);
           term.open(terminalContainer);
+          loadWebglRenderer(term);
           fitAddon.fit();
           resizeObserver = new ResizeObserver(() => {
             if (fitAddon && term) fitAddon.fit();

@@ -99,6 +99,17 @@ export function createRelayServer(
   const wss = new WebSocketServer({ server: httpServer, path: "/ws" });
 
   wss.on("connection", (ws: WebSocket, req: IncomingMessage) => {
+    // Disable Nagle on the underlying TCP socket. Node + the `ws`
+    // library default this to true since Node 16, but being explicit
+    // matters when small WS frames (single-keystroke echo, ~3 bytes)
+    // are the latency-sensitive payload — Nagle would otherwise
+    // batch them for up to 40ms before sending. Belt-and-suspenders.
+    try {
+      req.socket.setNoDelay(true);
+    } catch {
+      // Some socket implementations (e.g. unusual proxy stacks)
+      // don't support setNoDelay. Ignore — best-effort.
+    }
     const url = new URL(req.url || "/", `http://localhost:${port}`);
     const role = url.searchParams.get("role");
     const secretHash = url.searchParams.get("secret_hash");
