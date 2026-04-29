@@ -336,6 +336,23 @@
     .latency-stat.bad { color: #c44; }
     /* Brief flash after a successful copy. */
     #stats-btn.copied { background: #234; color: var(--accent); }
+
+    /* Health indicator: small filled circle, color reflects current
+       connection state. data-state controls color via attribute
+       selectors so JS only needs setAttribute. */
+    .health-indicator {
+      display: inline-block;
+      width: 8px;
+      height: 8px;
+      margin: 0 6px 0 4px;
+      border-radius: 50%;
+      vertical-align: middle;
+      transition: background-color 200ms linear, box-shadow 200ms linear;
+    }
+    .health-indicator[data-state="unknown"] { background: #444; }
+    .health-indicator[data-state="ok"]   { background: #4caf50; }
+    .health-indicator[data-state="warn"] { background: #c80; box-shadow: 0 0 4px #c80; }
+    .health-indicator[data-state="bad"]  { background: #c44; box-shadow: 0 0 5px #c44; }
     #terminal-container {
       flex: 1;
       overflow: hidden;
@@ -389,7 +406,9 @@
       border: 1px solid #333;
       border-radius: 2px;
       padding: 6px 10px;
-      font-size: 14px;
+      /* iOS Safari zooms in on focus when input font-size < 16px.
+         Pin to 16px so the zoom-in animation doesn't fire. */
+      font-size: 16px;
       outline: none;
     }
     #text-input-bar button {
@@ -441,6 +460,7 @@
   <div id="terminal-view">
     <div id="toolbar">
       <span class="session-name" id="session-name-label"></span>
+      <span id="health-indicator" class="health-indicator" data-state="unknown" title="Connection health"></span>
       <span id="latency-stat" class="latency-stat" title="Click 'Stats' to copy a full latency summary"></span>
       <button id="stats-btn" title="Copy latency stats to clipboard">Stats</button>
       <button id="detach-btn">Detach</button>

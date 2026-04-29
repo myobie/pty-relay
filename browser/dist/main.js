@@ -537,6 +537,118 @@ function formatCompact(s) {
   return `n=${s.count} p50=${s.median}ms p95=${s.p95}ms`;
 }
 
+// browser/src/health-indicator.ts
+var HEALTH_THRESHOLDS = {
+  /** total p50 threshold for "warn" classification */
+  warnP50Ms: 80,
+  /** total p50 threshold for "bad" */
+  badP50Ms: 200,
+  /** pending count that signals queues backing up */
+  warnPending: 5,
+  badPending: 20,
+  /** seconds without any WS frame from daemon (while attached)
+   *  before we consider the connection unhealthy */
+  warnIdleMs: 8e3,
+  badIdleMs: 2e4
+};
+function classify(inputs) {
+  if (!inputs.wsConnected) return "bad";
+  if (!inputs.attached) return "unknown";
+  if (inputs.msSinceLastWsFrame >= HEALTH_THRESHOLDS.badIdleMs) return "bad";
+  let level = "ok";
+  if (inputs.msSinceLastWsFrame >= HEALTH_THRESHOLDS.warnIdleMs) {
+    level = worstOf(level, "warn");
+  }
+  if (inputs.sampleCount > 0) {
+    if (inputs.totalP50Ms >= HEALTH_THRESHOLDS.badP50Ms) {
+      level = worstOf(level, "bad");
+    } else if (inputs.totalP50Ms >= HEALTH_THRESHOLDS.warnP50Ms) {
+      level = worstOf(level, "warn");
+    }
+  }
+  if (inputs.pending >= HEALTH_THRESHOLDS.badPending) {
+    level = worstOf(level, "bad");
+  } else if (inputs.pending >= HEALTH_THRESHOLDS.warnPending) {
+    level = worstOf(level, "warn");
+  }
+  return level;
+}
+function worstOf(a, b) {
+  const order = {
+    unknown: 0,
+    ok: 1,
+    warn: 2,
+    bad: 3
+  };
+  return order[a] > order[b] ? a : b;
+}
+function describe(state, inputs) {
+  if (state === "bad" && !inputs.wsConnected) return "Disconnected";
+  if (state === "bad" && inputs.msSinceLastWsFrame >= HEALTH_THRESHOLDS.badIdleMs) {
+    return `No traffic for ${Math.round(inputs.msSinceLastWsFrame / 1e3)}s`;
+  }
+  if (state === "bad") {
+    return `Slow: ${Math.round(inputs.totalP50Ms)}ms median, ${inputs.pending} pending`;
+  }
+  if (state === "warn") {
+    return `Degraded: ${Math.round(inputs.totalP50Ms)}ms median${inputs.pending > 0 ? `, ${inputs.pending} pending` : ""}`;
+  }
+  if (state === "ok") {
+    return `Healthy${inputs.sampleCount > 0 ? ` (${Math.round(inputs.totalP50Ms)}ms median)` : ""}`;
+  }
+  return "Unknown";
+}
+
+// browser/src/tentative-typing.ts
+var TENTATIVE_TIMEOUT_MS = 200;
+var SGR_DIM = "\x1B[2m";
+var SGR_RESET = "\x1B[22m";
+var CURSOR_LEFT = "\x1B[D";
+function isTentativeable(data) {
+  if (data.length !== 1) return false;
+  const code = data.charCodeAt(0);
+  return code >= 32 && code <= 126;
+}
+function startTentativeTyping(term2) {
+  let activeTimer = null;
+  let activeChar = null;
+  const onDataDisposer = term2.onData((data) => {
+    if (!isTentativeable(data)) return;
+    if (activeTimer) clearTimeout(activeTimer);
+    activeChar = data;
+    term2.write(SGR_DIM + data + SGR_RESET + CURSOR_LEFT);
+    activeTimer = setTimeout(() => {
+      activeTimer = null;
+      activeChar = null;
+      term2.write(" " + CURSOR_LEFT);
+    }, TENTATIVE_TIMEOUT_MS);
+  });
+  const onWriteParsedDisposer = term2.onWriteParsed(() => {
+    if (activeTimer) {
+      clearTimeout(activeTimer);
+      activeTimer = null;
+      activeChar = null;
+    }
+  });
+  return {
+    destroy() {
+      onDataDisposer.dispose();
+      onWriteParsedDisposer.dispose();
+      if (activeTimer) {
+        clearTimeout(activeTimer);
+        activeTimer = null;
+      }
+    }
+  };
+}
+function tentativeEnabled() {
+  try {
+    return localStorage.getItem("pty-relay:tentative") === "1";
+  } catch {
+    return false;
+  }
+}
+
 // browser/src/main.ts
 var MSG_DATA = 0;
 var MSG_DETACH = 2;
@@ -844,6 +956,8 @@ var terminalContainer = document.getElementById("terminal-container");
 var detachBtn = document.getElementById("detach-btn");
 var statsBtn = document.getElementById("stats-btn");
 var latencyStatEl = document.getElementById("latency-stat");
+var healthIndicatorEl = document.getElementById("health-indicator");
+var lastWsFrameAtMs = 0;
 var runtimeConfig = (() => {
   const meta = document.querySelector('meta[name="pty-relay-config"]');
   const fallback = { latencyStats: false };
@@ -931,7 +1045,48 @@ function loadWebglRenderer(t) {
 var latencyTracker = null;
 var latencyTickHandle = null;
 var latencyReportHandle = null;
+var healthTickHandle = null;
+var tentativeController = null;
 var LATENCY_TICK_MS = 1e3;
+var HEALTH_TICK_MS = 1e3;
+function bindTentativeTyping(t) {
+  if (!tentativeEnabled()) return;
+  if (tentativeController) tentativeController.destroy();
+  tentativeController = startTentativeTyping(t);
+}
+function teardownTentativeTyping() {
+  if (tentativeController) {
+    tentativeController.destroy();
+    tentativeController = null;
+  }
+}
+function updateHealthIndicator() {
+  const summary = latencyTracker?.summary();
+  const inputs = {
+    wsConnected: ws !== null && ws.readyState === WebSocket.OPEN,
+    attached: sessionAttached,
+    sampleCount: summary?.count ?? 0,
+    totalP50Ms: summary?.median ?? 0,
+    pending: summary?.pending ?? 0,
+    msSinceLastWsFrame: lastWsFrameAtMs === 0 ? Infinity : Date.now() - lastWsFrameAtMs
+  };
+  const state = classify(inputs);
+  healthIndicatorEl.setAttribute("data-state", state);
+  healthIndicatorEl.title = describe(state, inputs);
+}
+function startHealthTick() {
+  if (healthTickHandle) return;
+  healthTickHandle = setInterval(updateHealthIndicator, HEALTH_TICK_MS);
+  updateHealthIndicator();
+}
+function stopHealthTick() {
+  if (healthTickHandle) {
+    clearInterval(healthTickHandle);
+    healthTickHandle = null;
+  }
+  healthIndicatorEl.setAttribute("data-state", "unknown");
+  healthIndicatorEl.title = "Connection health";
+}
 var LATENCY_REPORT_INTERVAL_MS = 3e4;
 function bindLatencyTracker(t) {
   if (!runtimeConfig.latencyStats) return;
@@ -1002,6 +1157,8 @@ function disconnect() {
   }
   document.title = DEFAULT_DOC_TITLE;
   teardownLatencyTracker();
+  teardownTentativeTyping();
+  stopHealthTick();
   if (term) {
     term.dispose();
     term = null;
@@ -1047,6 +1204,7 @@ function attachToSession(sessionName, _cols, _rows) {
     });
     bindTerminalTitle(term, sessionName);
     bindLatencyTracker(term);
+    bindTentativeTyping(term);
   }
   sendJson({
     type: "attach",
@@ -1094,6 +1252,7 @@ function handleDecryptedMessage(plaintext) {
           });
           bindTerminalTitle(term, msg.session);
           bindLatencyTracker(term);
+          bindTentativeTyping(term);
         }
         return;
       } else if (msg.type === "sessions") {
@@ -1179,6 +1338,7 @@ detachBtn.addEventListener("click", () => {
   setUrlSession(null);
   packetParser = new PacketParser();
   teardownLatencyTracker();
+  teardownTentativeTyping();
   if (term) {
     term.dispose();
     term = null;
@@ -1284,13 +1444,25 @@ function setKbMode(mode) {
   keyboard.style.display = mode === "hidden" ? "none" : "";
   kbReopen.style.display = mode === "hidden" ? "block" : "none";
   if (mode === "panel") document.activeElement?.blur();
-  if (mode === "text") textInput.focus();
+  if (mode === "text") {
+    textInput.focus({ preventScroll: true });
+  }
   if (mode === "bar" && term) term.focus();
   updateVh();
 }
 function buildQuickBar() {
   const keys = [
     { label: "Txt", action: () => setKbMode("text") },
+    {
+      label: "Paste",
+      action: async () => {
+        try {
+          const text = await navigator.clipboard.readText();
+          if (text) sendKey(text);
+        } catch {
+        }
+      }
+    },
     { label: "Esc", seq: "\x1B" },
     { label: "Tab", seq: "	" },
     { label: "Ctrl", action: () => toggleModifier("ctrl"), id: "ctrl" },
@@ -1305,6 +1477,13 @@ function buildQuickBar() {
     { label: "\u2193", seq: "\x1B[B" },
     { label: "Home", seq: "\x1B[H" },
     { label: "End", seq: "\x1B[F" },
+    {
+      // Scroll the terminal to the bottom of its scrollback. Useful
+      // when output's pushed content above the visible viewport
+      // (e.g. swiped up on mobile to read history).
+      label: "\u2193Bot",
+      action: () => term?.scrollToBottom()
+    },
     { label: "\u2328", action: () => setKbMode("panel") },
     { label: "\u2715", action: () => setKbMode("hidden") }
   ];
@@ -1322,7 +1501,7 @@ function buildQuickBar() {
 }
 function buildKeyPanel() {
   const keys = [
-    { label: "\u25BE Bar", action: () => setKbMode("bar") },
+    { label: "\u2190", action: () => setKbMode("bar") },
     { label: "S+Tab", seq: "\x1B[Z" },
     { label: "Ins", seq: "\x1B[2~" },
     { label: "Del", seq: "\x1B[3~" },
@@ -1386,8 +1565,11 @@ function buildKeyPanel() {
 textSendBtn.addEventListener("click", () => {
   const val = textInput.value;
   if (val) {
-    sendKey(val + "\r");
+    const PASTE_START = "\x1B[200~";
+    const PASTE_END = "\x1B[201~";
+    sendKey(PASTE_START + val + PASTE_END);
     textInput.value = "";
+    setTimeout(() => sendKey("\r"), 50);
   }
 });
 textInput.addEventListener("keydown", (e) => {
@@ -1538,11 +1720,13 @@ function connectToRelay() {
       } else {
         const data = new Uint8Array(event.data);
         if (latencyTracker) latencyTracker.recordRecv(data.length);
+        lastWsFrameAtMs = Date.now();
         if (!handshakeComplete) {
           try {
             transport = handshake.readWelcome(data);
             handshakeComplete = true;
             reconnectDelay = 1e3;
+            startHealthTick();
             sendJson({
               type: "hello",
               client: "web",

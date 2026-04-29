@@ -419,6 +419,14 @@ const terminalContainer = document.getElementById("terminal-container")!;
 const detachBtn = document.getElementById("detach-btn")!;
 const statsBtn = document.getElementById("stats-btn")!;
 const latencyStatEl = document.getElementById("latency-stat")!;
+const healthIndicatorEl = document.getElementById("health-indicator")!;
+
+// Wall-clock timestamp of the most recent binary WS frame from the
+// daemon. The health classifier uses (now - this) to detect traffic
+// stalls. Initialised to 0; on first frame we set it. While a session
+// is attached, sustained gaps here are a sign the connection's dead
+// even when no error has been reported.
+let lastWsFrameAtMs = 0;
 
 /** Read runtime config injected by the daemon as
  *  <meta name="pty-relay-config" content='{"latencyStats":true}'>.
@@ -578,7 +586,65 @@ function loadWebglRenderer(t: Terminal): void {
 let latencyTracker: LatencyTracker | null = null;
 let latencyTickHandle: ReturnType<typeof setInterval> | null = null;
 let latencyReportHandle: ReturnType<typeof setInterval> | null = null;
+let healthTickHandle: ReturnType<typeof setInterval> | null = null;
+let tentativeController: TentativeController | null = null;
 const LATENCY_TICK_MS = 1000;
+const HEALTH_TICK_MS = 1000;
+
+/** Opt-in tentative typing UI: render keystrokes locally as dim
+ *  chars so the user sees their input immediately. Off by default;
+ *  enable via `localStorage.setItem('pty-relay:tentative', '1')`
+ *  and reload. */
+function bindTentativeTyping(t: Terminal): void {
+  if (!tentativeEnabled()) return;
+  if (tentativeController) tentativeController.destroy();
+  tentativeController = startTentativeTyping(t);
+}
+
+function teardownTentativeTyping(): void {
+  if (tentativeController) {
+    tentativeController.destroy();
+    tentativeController = null;
+  }
+}
+
+/** Update the health-indicator dot from current state. Pure read of
+ *  module-level vars; safe to call from any tick. Lives outside the
+ *  latency tracker because the indicator should work even when
+ *  --latency-stats is OFF — without samples, the classifier still
+ *  reports "ok" / "bad on disconnect" / "warn on traffic gap". */
+function updateHealthIndicator(): void {
+  const summary = latencyTracker?.summary();
+  const inputs = {
+    wsConnected: ws !== null && ws.readyState === WebSocket.OPEN,
+    attached: sessionAttached,
+    sampleCount: summary?.count ?? 0,
+    totalP50Ms: summary?.median ?? 0,
+    pending: summary?.pending ?? 0,
+    msSinceLastWsFrame:
+      lastWsFrameAtMs === 0 ? Infinity : Date.now() - lastWsFrameAtMs,
+  };
+  const state = classifyHealth(inputs);
+  healthIndicatorEl.setAttribute("data-state", state);
+  healthIndicatorEl.title = describeHealth(state, inputs);
+}
+
+function startHealthTick(): void {
+  if (healthTickHandle) return;
+  healthTickHandle = setInterval(updateHealthIndicator, HEALTH_TICK_MS);
+  updateHealthIndicator();
+}
+
+function stopHealthTick(): void {
+  if (healthTickHandle) {
+    clearInterval(healthTickHandle);
+    healthTickHandle = null;
+  }
+  // Reset to unknown so the dot doesn't lie while the page is between
+  // sessions.
+  healthIndicatorEl.setAttribute("data-state", "unknown");
+  healthIndicatorEl.title = "Connection health";
+}
 const LATENCY_REPORT_INTERVAL_MS = 30_000;
 
 function bindLatencyTracker(t: Terminal): void {
@@ -661,6 +727,8 @@ function disconnect(): void {
   }
   document.title = DEFAULT_DOC_TITLE;
   teardownLatencyTracker();
+  teardownTentativeTyping();
+  stopHealthTick();
   if (term) {
     term.dispose();
     term = null;
@@ -713,6 +781,7 @@ function attachToSession(sessionName: string, _cols: number, _rows: number): voi
     });
     bindTerminalTitle(term, sessionName);
     bindLatencyTracker(term);
+    bindTentativeTyping(term);
   }
   sendJson({
     type: "attach",
@@ -765,6 +834,7 @@ function handleDecryptedMessage(plaintext: Uint8Array): void {
           });
           bindTerminalTitle(term, msg.session);
           bindLatencyTracker(term);
+          bindTentativeTyping(term);
         }
         return;
       } else if (msg.type === "sessions") {
@@ -815,6 +885,16 @@ import {
   formatCompact,
   type LatencyTracker,
 } from "./latency-stats.ts";
+import {
+  classify as classifyHealth,
+  describe as describeHealth,
+  type HealthInputs,
+} from "./health-indicator.ts";
+import {
+  startTentativeTyping,
+  tentativeEnabled,
+  type TentativeController,
+} from "./tentative-typing.ts";
 
 function spawnSession(name: string, cwd?: string): void {
   showStatus("Starting session...");
@@ -877,6 +957,7 @@ detachBtn.addEventListener("click", () => {
   setUrlSession(null);
   packetParser = new PacketParser();
   teardownLatencyTracker();
+  teardownTentativeTyping();
   if (term) {
     term.dispose();
     term = null;
@@ -992,7 +1073,12 @@ function setKbMode(mode: "bar" | "panel" | "text" | "hidden"): void {
   keyboard.style.display = mode === "hidden" ? "none" : "";
   kbReopen.style.display = mode === "hidden" ? "block" : "none";
   if (mode === "panel") (document.activeElement as HTMLElement | null)?.blur();
-  if (mode === "text") textInput.focus();
+  if (mode === "text") {
+    // preventScroll stops iOS Safari from auto-scrolling the page to
+    // bring the input into view — without it, the page jumps around
+    // because our layout uses overflow:hidden + visualViewport vh.
+    textInput.focus({ preventScroll: true });
+  }
   if (mode === "bar" && term) term.focus();
   updateVh();
 }
@@ -1007,6 +1093,19 @@ interface KeyDef {
 function buildQuickBar(): void {
   const keys: KeyDef[] = [
     { label: "Txt", action: () => setKbMode("text") },
+    {
+      label: "Paste",
+      action: async () => {
+        // Read the clipboard and forward as data. Requires a user
+        // gesture and a secure context (HTTPS or localhost); the
+        // tap on the button counts as the gesture. Failures (denied
+        // permission, no clipboard text) are silent.
+        try {
+          const text = await navigator.clipboard.readText();
+          if (text) sendKey(text);
+        } catch {}
+      },
+    },
     { label: "Esc", seq: "\x1B" },
     { label: "Tab", seq: "\t" },
     { label: "Ctrl", action: () => toggleModifier("ctrl"), id: "ctrl" },
@@ -1021,6 +1120,13 @@ function buildQuickBar(): void {
     { label: "\u2193", seq: "\x1B[B" },
     { label: "Home", seq: "\x1B[H" },
     { label: "End", seq: "\x1B[F" },
+    {
+      // Scroll the terminal to the bottom of its scrollback. Useful
+      // when output's pushed content above the visible viewport
+      // (e.g. swiped up on mobile to read history).
+      label: "\u2193Bot",
+      action: () => term?.scrollToBottom(),
+    },
     { label: "\u2328", action: () => setKbMode("panel") },
     { label: "\u2715", action: () => setKbMode("hidden") },
   ];
@@ -1039,7 +1145,7 @@ function buildQuickBar(): void {
 
 function buildKeyPanel(): void {
   const keys: KeyDef[] = [
-    { label: "\u25BE Bar", action: () => setKbMode("bar") },
+    { label: "\u2190", action: () => setKbMode("bar") },
     { label: "S+Tab", seq: "\x1B[Z" },
     { label: "Ins", seq: "\x1B[2~" },
     { label: "Del", seq: "\x1B[3~" },
@@ -1103,8 +1209,27 @@ function buildKeyPanel(): void {
 textSendBtn.addEventListener("click", () => {
   const val = textInput.value;
   if (val) {
-    sendKey(val + "\r");
+    // Two-step send, matching how `pty send --paste … && pty send
+    // key:return` works in the CLI:
+    //   1. The text wrapped in bracketed-paste markers
+    //   2. After a short delay, a CR alone as the Enter keypress
+    //
+    // The delay matters: receivers like Claude Code / Codex /
+    // Cursor parse paste mode and may consume any chars
+    // immediately after the paste-end marker as part of the paste
+    // flush. Without a delay, the trailing \r gets eaten by the
+    // paste handler instead of acting as Enter. 50ms is short
+    // enough to feel instant and long enough to land in a
+    // separate event-loop tick on every receiver we've seen.
+    //
+    // Programs without bracketed-paste support (plain bash, etc.)
+    // just see the markers as unknown escape sequences and
+    // ignore them; the \r still submits as usual.
+    const PASTE_START = "\x1b[200~";
+    const PASTE_END = "\x1b[201~";
+    sendKey(PASTE_START + val + PASTE_END);
     textInput.value = "";
+    setTimeout(() => sendKey("\r"), 50);
   }
 });
 textInput.addEventListener("keydown", (e: KeyboardEvent) => {
@@ -1277,11 +1402,19 @@ function connectToRelay(): void {
         // moment we knew bytes arrived. Pre-handshake frames count
         // too (the welcome frame is informative).
         if (latencyTracker) latencyTracker.recordRecv(data.length);
+        // Health indicator: any frame from the daemon proves the
+        // connection is alive. Used by the classifier to detect
+        // traffic stalls.
+        lastWsFrameAtMs = Date.now();
         if (!handshakeComplete) {
           try {
             transport = handshake.readWelcome(data);
             handshakeComplete = true;
             reconnectDelay = 1e3;
+            // Tunnel up — start the health-indicator tick. Stays
+            // running across attach/detach within a session; only
+            // stops on full disconnect.
+            startHealthTick();
             sendJson({
               type: "hello",
               client: "web",
