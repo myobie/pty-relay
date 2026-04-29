@@ -1,152 +1,232 @@
 /**
  * Live latency tracking for the web terminal.
  *
- * Pipeline we measure:
- *   user keystroke -> term.onData (sentAt)
+ * Pipeline we measure, with one timestamp per stage:
+ *
+ *   user keystroke -> term.onData                    (sentAt)
  *     -> encrypt -> WS send -> daemon -> pty -> echo back
- *     -> WS recv -> decrypt -> term.write -> onWriteParsed
- *     -> next RAF -> onRender (renderedAt)
+ *     -> ws.onmessage (binary)                       (recvAt)
+ *     -> decrypt -> term.write -> onWriteParsed      (parsedAt)
+ *     -> next RAF -> term.onRender                   (renderedAt)
  *
- * We can't tie a specific echo byte back to its origin keystroke
+ * Per-stage durations:
+ *   network = recvAt    - sentAt    (encrypt + WS round-trip + decrypt)
+ *   parse   = parsedAt  - recvAt    (xterm parser handling the bytes)
+ *   paint   = renderedAt - parsedAt (RAF wait + actual paint)
+ *
+ * We can't tie a SPECIFIC echo byte back to its origin keystroke
  * without protocol changes — bash echoes match what you typed in
- * order, but program output is intermixed. So this is a FIFO
- * approximation: each user keystroke pushes a timestamp; each render
- * pops one. For "type into a shell prompt and watch it appear" this
- * is accurate; for noisy programs it's biased upward (drops are
- * silent so the count is a sanity-check, not a guarantee).
+ * order, but program output is intermixed and the daemon may batch
+ * many chars into one WS frame. So this is FIFO matching at every
+ * stage: each event (recv, parse, render) advances the oldest
+ * pending entry to its next stage. For "type into a shell prompt"
+ * this is accurate per-char; for noisy programs the per-sample
+ * breakdown is biased upward (queue inflation) but the AGGREGATE
+ * per-stage medians remain meaningful, since N keystrokes still
+ * produce N stage transitions on average.
  *
- * Design choice: this module knows nothing about WebSocket or Noise.
- * It only sees xterm.js events. That's intentional — the user's
- * "letter doesn't appear fast enough" complaint is end-to-end, and
- * end-to-end is what we measure here.
+ * Design choice: this module knows about WebSocket recv timing
+ * (via recordRecv called by main.ts) but nothing about Noise or
+ * the relay protocol. All measurements are end-user-felt latency
+ * decomposed into the parts we can observe in the browser.
  */
 
-export interface LatencySummary {
+/** Aggregate stats over a single dimension (total, network, parse,
+ *  paint). Empty when count = 0. All ms. */
+export interface StageStats {
   count: number;
-  /** Pending sends with no matched render yet. Useful sanity check —
-   *  if this number grows large, the FIFO approximation is breaking
-   *  down (program output disambiguation issue, see module docs). */
-  pending: number;
-  /** All in milliseconds. */
   min: number;
   median: number;
   p95: number;
   max: number;
-  /** Recent samples (last 200), for advanced analysis. */
-  samples: number[];
-  /** Window over which samples were collected, in seconds. */
-  windowSec: number;
 }
 
-/** Per-WebSocket-frame metrics captured outside the xterm event loop.
- *  Less polluted than render-based measurements — every binary frame
- *  is a real network arrival from the daemon. We don't try to pair
- *  these with specific keystrokes; consumers can correlate by index
- *  or timestamp if they want. */
+/** One completed keystroke's per-stage timings. */
+export interface StagedSample {
+  /** Wall-clock-ish performance.now() — useful as an x-axis when
+   *  charting samples within a window. Origin is the page load. */
+  sentAt: number;
+  /** Per-stage durations in ms (rounded to 0.1). */
+  network: number;
+  parse: number;
+  paint: number;
+  total: number;
+}
+
+export interface KeystrokeReport {
+  count: number;
+  /** Entries in flight without all four stages filled. */
+  pending: number;
+  /** Window length, seconds. */
+  windowSec: number;
+  total: StageStats;
+  network: StageStats;
+  parse: StageStats;
+  paint: StageStats;
+  samples: StagedSample[];
+}
+
+/** Per-WebSocket-frame metrics captured outside the xterm event loop. */
 export interface WsFrameStats {
   count: number;
   /** Bytes per frame across the window. */
   sizes: number[];
-  /** Gaps between consecutive frame arrivals, in ms. The first frame
-   *  has no prior, so gaps.length === count - 1. */
+  /** Gaps between consecutive frame arrivals, in ms. */
   interArrivalMs: number[];
 }
 
-/** A full structured report (keystroke samples + WS frame samples).
- *  Snapshot-able, JSON-stringifiable; flushed to the daemon
- *  periodically to be appended to a JSONL log on disk. */
+/** A full structured report. Snapshot-able, JSON-stringifiable;
+ *  flushed to the daemon periodically as a JSONL line. */
 export interface LatencyReport {
   /** ms since unix epoch — wall-clock for log correlation. */
   startedAt: number;
   endedAt: number;
-  /** Round-trip key-to-render samples, FIFO-matched (see module docs
-   *  for caveats about burst inflation). */
-  keystrokes: LatencySummary;
+  keystrokes: KeystrokeReport;
   ws: WsFrameStats;
 }
 
+/** Compact, back-compat-ish summary for the toolbar indicator. We
+ *  keep it as the "total" view. */
+export interface LatencySummary {
+  count: number;
+  pending: number;
+  min: number;
+  median: number;
+  p95: number;
+  max: number;
+  windowSec: number;
+}
+
 export interface LatencyTracker {
-  /** Snapshot the current rolling window. */
+  /** Compact "total" snapshot (used by the toolbar indicator). */
   summary(): LatencySummary;
-  /** Build a structured report covering the current window — used by
-   *  the auto-flush path that ships data to the daemon. */
+  /** Build a full structured report covering the current window. */
   report(): LatencyReport;
   /** Note an incoming WebSocket binary frame. Caller passes byte
-   *  length. The tracker timestamps internally. */
+   *  length. The tracker timestamps internally and uses this as
+   *  the recvAt for the next pending keystroke. */
   recordRecv(bytes: number): void;
   /** Drop all samples + pending. Call after a successful flush so
    *  each report covers a disjoint window. */
   reset(): void;
-  /** Tear down event listeners. Returned by the factory's startup. */
   destroy(): void;
 }
 
-/** Minimal subset of xterm.js Terminal that this module needs. The
- *  full type from @xterm/xterm has dozens of fields; pulling them
- *  in would couple this module to the browser bundle's type space.
- *  Test code can pass a fake that exposes only these. */
+/** Minimal subset of xterm.js Terminal that this module needs. */
 export interface TermLike {
   onData(cb: (data: string) => void): { dispose(): void };
   onRender(cb: (e: { start: number; end: number }) => void): { dispose(): void };
+  /** Fires after `term.write()` completes (parser done). xterm.js
+   *  exposes this as `onWriteParsed`. */
+  onWriteParsed(cb: () => void): { dispose(): void };
 }
 
 const SAMPLE_CAP = 200;
+const PENDING_CAP = 1000;
 const WS_FRAME_CAP = 200;
 
+interface PendingEntry {
+  sentAt: number;
+  recvAt?: number;
+  parsedAt?: number;
+}
+
 export function createLatencyTracker(term: TermLike): LatencyTracker {
-  const pending: number[] = []; // queue of sentAt timestamps
-  const samples: number[] = []; // ring of completed roundtrip ms
-  // WS frame metrics: parallel arrays so a single push() at recv time
-  // touches both. We keep raw arrival timestamps so the inter-arrival
-  // computation is consistent regardless of when reset() was called.
-  const wsArrivals: number[] = []; // performance.now() per arrival
-  const wsSizes: number[] = []; // bytes per arrival
+  // Pending: keystrokes with sentAt set but not yet seen all stages.
+  // We don't preserve renderedAt here — once we see a render, we
+  // promote the entry to a completed sample and remove from pending.
+  const pending: PendingEntry[] = [];
+  const samples: StagedSample[] = [];
+  const wsArrivals: number[] = [];
+  const wsSizes: number[] = [];
   let trackerStartedAt = performance.now();
   let trackerStartedAtMs = Date.now();
 
   const onDataDisposer = term.onData((data: string) => {
     const now = performance.now();
-    // Push one timestamp per character. Pasting N chars at once is one
-    // onData with N chars — they should each get marked since each
-    // echoes back individually.
-    for (let i = 0; i < data.length; i++) pending.push(now);
-  });
-
-  const onRenderDisposer = term.onRender(() => {
-    if (pending.length === 0) return;
-    const sentAt = pending.shift()!;
-    const elapsed = performance.now() - sentAt;
-    samples.push(elapsed);
-    if (samples.length > SAMPLE_CAP) samples.shift();
-  });
-
-  function summaryNow(): LatencySummary {
-    if (samples.length === 0) {
-      return {
-        count: 0,
-        pending: pending.length,
-        min: 0,
-        median: 0,
-        p95: 0,
-        max: 0,
-        samples: [],
-        windowSec: round1((performance.now() - trackerStartedAt) / 1000),
-      };
+    for (let i = 0; i < data.length; i++) {
+      pending.push({ sentAt: now });
+      if (pending.length > PENDING_CAP) pending.shift();
     }
-    const sorted = samples.slice().sort((a, b) => a - b);
-    // Nearest-rank percentile: ceil(n*p) - 1, clamped to [0, n-1].
-    // For n=10, p=0.5 → idx 4 (the 5th value); p=0.95 → idx 9.
+  });
+
+  // Each event advances the OLDEST pending entry that hasn't yet
+  // filled this stage AND whose previous stage IS filled. With
+  // strict FIFO ordering that's just `pending.find(predicate)`.
+  function advanceRecv(): void {
+    const entry = pending.find((p) => p.recvAt === undefined);
+    if (entry) entry.recvAt = performance.now();
+  }
+  function advanceParsed(): void {
+    const entry = pending.find(
+      (p) => p.recvAt !== undefined && p.parsedAt === undefined
+    );
+    if (entry) entry.parsedAt = performance.now();
+  }
+  function advanceRender(): void {
+    // First entry with parsedAt set — promote to a completed sample.
+    const idx = pending.findIndex((p) => p.parsedAt !== undefined);
+    if (idx === -1) return;
+    const entry = pending[idx];
+    pending.splice(idx, 1);
+    const now = performance.now();
+    samples.push({
+      sentAt: round1(entry.sentAt - trackerStartedAt), // relative-to-window for compactness
+      network: round1((entry.recvAt ?? now) - entry.sentAt),
+      parse: round1((entry.parsedAt ?? now) - (entry.recvAt ?? now)),
+      paint: round1(now - (entry.parsedAt ?? now)),
+      total: round1(now - entry.sentAt),
+    });
+    if (samples.length > SAMPLE_CAP) samples.shift();
+  }
+
+  const onWriteParsedDisposer = term.onWriteParsed(() => {
+    advanceParsed();
+  });
+  const onRenderDisposer = term.onRender(() => {
+    advanceRender();
+  });
+
+  function statsFromArray(values: number[]): StageStats {
+    if (values.length === 0) {
+      return { count: 0, min: 0, median: 0, p95: 0, max: 0 };
+    }
+    const sorted = values.slice().sort((a, b) => a - b);
     const pct = (p: number) =>
       sorted[Math.max(0, Math.min(sorted.length - 1, Math.ceil(sorted.length * p) - 1))];
     return {
-      count: samples.length,
-      pending: pending.length,
+      count: values.length,
       min: round1(sorted[0]),
       median: round1(pct(0.5)),
       p95: round1(pct(0.95)),
       max: round1(sorted[sorted.length - 1]),
-      samples: samples.slice(),
+    };
+  }
+
+  function summaryNow(): LatencySummary {
+    const totals = samples.map((s) => s.total);
+    const stats = statsFromArray(totals);
+    return {
+      count: stats.count,
+      pending: pending.length,
+      min: stats.min,
+      median: stats.median,
+      p95: stats.p95,
+      max: stats.max,
       windowSec: round1((performance.now() - trackerStartedAt) / 1000),
+    };
+  }
+
+  function keystrokeReportNow(): KeystrokeReport {
+    return {
+      count: samples.length,
+      pending: pending.length,
+      windowSec: round1((performance.now() - trackerStartedAt) / 1000),
+      total: statsFromArray(samples.map((s) => s.total)),
+      network: statsFromArray(samples.map((s) => s.network)),
+      parse: statsFromArray(samples.map((s) => s.parse)),
+      paint: statsFromArray(samples.map((s) => s.paint)),
+      samples: samples.slice(),
     };
   }
 
@@ -168,7 +248,7 @@ export function createLatencyTracker(term: TermLike): LatencyTracker {
       return {
         startedAt: trackerStartedAtMs,
         endedAt: Date.now(),
-        keystrokes: summaryNow(),
+        keystrokes: keystrokeReportNow(),
         ws: wsStatsNow(),
       };
     },
@@ -176,13 +256,11 @@ export function createLatencyTracker(term: TermLike): LatencyTracker {
       const now = performance.now();
       wsArrivals.push(now);
       wsSizes.push(bytes);
-      // Cap independently of keystroke samples — programs that emit a
-      // lot of output can blow this past 200 quickly. Keep the most
-      // recent N so the report stays bounded.
       if (wsArrivals.length > WS_FRAME_CAP) {
         wsArrivals.shift();
         wsSizes.shift();
       }
+      advanceRecv();
     },
     reset() {
       pending.length = 0;
@@ -195,6 +273,7 @@ export function createLatencyTracker(term: TermLike): LatencyTracker {
     destroy() {
       onDataDisposer.dispose();
       onRenderDisposer.dispose();
+      onWriteParsedDisposer.dispose();
     },
   };
 }

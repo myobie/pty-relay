@@ -375,6 +375,7 @@ function makeCol(extraClass, text) {
 
 // browser/src/latency-stats.ts
 var SAMPLE_CAP = 200;
+var PENDING_CAP = 1e3;
 var WS_FRAME_CAP = 200;
 function createLatencyTracker(term2) {
   const pending = [];
@@ -385,39 +386,80 @@ function createLatencyTracker(term2) {
   let trackerStartedAtMs = Date.now();
   const onDataDisposer = term2.onData((data) => {
     const now = performance.now();
-    for (let i = 0; i < data.length; i++) pending.push(now);
+    for (let i = 0; i < data.length; i++) {
+      pending.push({ sentAt: now });
+      if (pending.length > PENDING_CAP) pending.shift();
+    }
+  });
+  function advanceRecv() {
+    const entry = pending.find((p) => p.recvAt === void 0);
+    if (entry) entry.recvAt = performance.now();
+  }
+  function advanceParsed() {
+    const entry = pending.find(
+      (p) => p.recvAt !== void 0 && p.parsedAt === void 0
+    );
+    if (entry) entry.parsedAt = performance.now();
+  }
+  function advanceRender() {
+    const idx = pending.findIndex((p) => p.parsedAt !== void 0);
+    if (idx === -1) return;
+    const entry = pending[idx];
+    pending.splice(idx, 1);
+    const now = performance.now();
+    samples.push({
+      sentAt: round1(entry.sentAt - trackerStartedAt),
+      // relative-to-window for compactness
+      network: round1((entry.recvAt ?? now) - entry.sentAt),
+      parse: round1((entry.parsedAt ?? now) - (entry.recvAt ?? now)),
+      paint: round1(now - (entry.parsedAt ?? now)),
+      total: round1(now - entry.sentAt)
+    });
+    if (samples.length > SAMPLE_CAP) samples.shift();
+  }
+  const onWriteParsedDisposer = term2.onWriteParsed(() => {
+    advanceParsed();
   });
   const onRenderDisposer = term2.onRender(() => {
-    if (pending.length === 0) return;
-    const sentAt = pending.shift();
-    const elapsed = performance.now() - sentAt;
-    samples.push(elapsed);
-    if (samples.length > SAMPLE_CAP) samples.shift();
+    advanceRender();
   });
-  function summaryNow() {
-    if (samples.length === 0) {
-      return {
-        count: 0,
-        pending: pending.length,
-        min: 0,
-        median: 0,
-        p95: 0,
-        max: 0,
-        samples: [],
-        windowSec: round1((performance.now() - trackerStartedAt) / 1e3)
-      };
+  function statsFromArray(values) {
+    if (values.length === 0) {
+      return { count: 0, min: 0, median: 0, p95: 0, max: 0 };
     }
-    const sorted = samples.slice().sort((a, b) => a - b);
+    const sorted = values.slice().sort((a, b) => a - b);
     const pct = (p) => sorted[Math.max(0, Math.min(sorted.length - 1, Math.ceil(sorted.length * p) - 1))];
     return {
-      count: samples.length,
-      pending: pending.length,
+      count: values.length,
       min: round1(sorted[0]),
       median: round1(pct(0.5)),
       p95: round1(pct(0.95)),
-      max: round1(sorted[sorted.length - 1]),
-      samples: samples.slice(),
+      max: round1(sorted[sorted.length - 1])
+    };
+  }
+  function summaryNow() {
+    const totals = samples.map((s) => s.total);
+    const stats = statsFromArray(totals);
+    return {
+      count: stats.count,
+      pending: pending.length,
+      min: stats.min,
+      median: stats.median,
+      p95: stats.p95,
+      max: stats.max,
       windowSec: round1((performance.now() - trackerStartedAt) / 1e3)
+    };
+  }
+  function keystrokeReportNow() {
+    return {
+      count: samples.length,
+      pending: pending.length,
+      windowSec: round1((performance.now() - trackerStartedAt) / 1e3),
+      total: statsFromArray(samples.map((s) => s.total)),
+      network: statsFromArray(samples.map((s) => s.network)),
+      parse: statsFromArray(samples.map((s) => s.parse)),
+      paint: statsFromArray(samples.map((s) => s.paint)),
+      samples: samples.slice()
     };
   }
   function wsStatsNow() {
@@ -437,7 +479,7 @@ function createLatencyTracker(term2) {
       return {
         startedAt: trackerStartedAtMs,
         endedAt: Date.now(),
-        keystrokes: summaryNow(),
+        keystrokes: keystrokeReportNow(),
         ws: wsStatsNow()
       };
     },
@@ -449,6 +491,7 @@ function createLatencyTracker(term2) {
         wsArrivals.shift();
         wsSizes.shift();
       }
+      advanceRecv();
     },
     reset() {
       pending.length = 0;
@@ -461,6 +504,7 @@ function createLatencyTracker(term2) {
     destroy() {
       onDataDisposer.dispose();
       onRenderDisposer.dispose();
+      onWriteParsedDisposer.dispose();
     }
   };
 }

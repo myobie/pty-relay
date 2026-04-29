@@ -160,14 +160,21 @@ export async function start(
       // <configDir>/latency.jsonl so an operator can `tail -f` the
       // file or post-process it offline. Best-effort: a failed write
       // never breaks the session.
+      //
+      // Rotation: when latency.jsonl crosses LATENCY_LOG_MAX_BYTES,
+      // rename it to latency.jsonl.old (overwriting any prior .old)
+      // and start fresh. Caps disk use at ~2x that limit. Heavy
+      // typing = ~500KB/hr; 10MB ≈ 20 hours of active data, plenty
+      // for a debugging session.
       if (msg.type === "latency_report") {
         const dir = configDir ?? defaultConfigDir();
+        const file = path.join(dir, "latency.jsonl");
         const line = JSON.stringify({
           ts: new Date().toISOString(),
           clientId,
           ...msg,
         }) + "\n";
-        fs.appendFile(path.join(dir, "latency.jsonl"), line, () => {});
+        appendLatencyLine(file, line);
         return true;
       }
 
@@ -491,6 +498,30 @@ export async function start(
  * Silently no-op if qrencode isn't available — the URL is still printed
  * right above, so the user always has a fallback.
  */
+/** Cap on latency.jsonl size before rotation. Picked so an active
+ *  debugging session (a few hours of typing) fits comfortably and
+ *  the file never grows unbounded. ~500KB/hr of typing = ~20 hours
+ *  of active data at this cap. The rotation is single-step (rename
+ *  to .old, start fresh), so worst-case disk use is 2x. */
+const LATENCY_LOG_MAX_BYTES = 10 * 1024 * 1024;
+
+function appendLatencyLine(filePath: string, line: string): void {
+  fs.stat(filePath, (statErr, stats) => {
+    if (!statErr && stats && stats.size + line.length > LATENCY_LOG_MAX_BYTES) {
+      // Rotate. fs.rename is atomic within the same dir; failures
+      // (race with another rotator, missing old, etc.) are silent —
+      // the worst case is the file briefly grows past the cap or
+      // the next .old isn't written. Latency telemetry isn't
+      // load-bearing.
+      fs.rename(filePath, filePath + ".old", () => {
+        fs.appendFile(filePath, line, () => {});
+      });
+      return;
+    }
+    fs.appendFile(filePath, line, () => {});
+  });
+}
+
 function printQrCode(url: string): void {
   try {
     const result = execFileSync("qrencode", ["-t", "ANSIUTF8", "-m", "1", url], {

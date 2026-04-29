@@ -1,8 +1,9 @@
 // @vitest-environment happy-dom
 /**
  * Unit tests for the live latency tracker. Drives a fake xterm
- * `TermLike` so we can inject onData / onRender events at controlled
- * timestamps and verify the FIFO matching + summary stats.
+ * `TermLike` so we can inject onData / onWriteParsed / onRender
+ * events at controlled timestamps and verify the FIFO matching +
+ * stage decomposition + report shape.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import {
@@ -15,22 +16,29 @@ import {
 
 interface FakeTerm extends TermLike {
   emitData(s: string): void;
+  emitParsed(): void;
   emitRender(): void;
 }
 
 function makeFakeTerm(): FakeTerm {
   let onDataCb: ((s: string) => void) | null = null;
+  let onParsedCb: (() => void) | null = null;
   let onRenderCb: ((e: { start: number; end: number }) => void) | null = null;
   return {
     onData(cb) {
       onDataCb = cb;
       return { dispose() { onDataCb = null; } };
     },
+    onWriteParsed(cb) {
+      onParsedCb = cb;
+      return { dispose() { onParsedCb = null; } };
+    },
     onRender(cb) {
       onRenderCb = cb;
       return { dispose() { onRenderCb = null; } };
     },
     emitData(s) { onDataCb?.(s); },
+    emitParsed() { onParsedCb?.(); },
     emitRender() { onRenderCb?.({ start: 0, end: 0 }); },
   };
 }
@@ -49,205 +57,185 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
+/** Walk one keystroke through all four stages with the given per-
+ *  stage durations (ms). Returns the simulated total. */
+function fullStroke(term: FakeTerm, network: number, parse: number, paint: number): number {
+  term.emitData("x");
+  now += network;
+  tracker!.recordRecv(8);
+  now += parse;
+  term.emitParsed();
+  now += paint;
+  term.emitRender();
+  return network + parse + paint;
+}
+
 describe("createLatencyTracker", () => {
-  it("returns zeroed summary when no events have happened yet", () => {
+  it("zeros when nothing happened", () => {
     const term = makeFakeTerm();
     tracker = createLatencyTracker(term);
-    const s = tracker.summary();
-    expect(s.count).toBe(0);
-    expect(s.pending).toBe(0);
-    expect(s.median).toBe(0);
-    expect(s.samples).toEqual([]);
+    const r = tracker.report();
+    expect(r.keystrokes.count).toBe(0);
+    expect(r.keystrokes.pending).toBe(0);
+    expect(r.ws.count).toBe(0);
   });
 
-  it("records a single roundtrip when one keystroke is followed by one render", () => {
+  it("records a single full-stage keystroke with each stage's duration", () => {
     const term = makeFakeTerm();
     tracker = createLatencyTracker(term);
-    term.emitData("a");
-    now += 42;
-    term.emitRender();
-    const s = tracker.summary();
-    expect(s.count).toBe(1);
-    expect(s.pending).toBe(0);
-    expect(s.median).toBe(42);
-    expect(s.min).toBe(42);
-    expect(s.max).toBe(42);
+    fullStroke(term, 30, 5, 10); // network=30, parse=5, paint=10
+    const r = tracker.report();
+    expect(r.keystrokes.count).toBe(1);
+    expect(r.keystrokes.pending).toBe(0);
+    expect(r.keystrokes.samples[0]).toMatchObject({
+      network: 30,
+      parse: 5,
+      paint: 10,
+      total: 45,
+    });
+    expect(r.keystrokes.network).toMatchObject({ count: 1, median: 30 });
+    expect(r.keystrokes.parse).toMatchObject({ count: 1, median: 5 });
+    expect(r.keystrokes.paint).toMatchObject({ count: 1, median: 10 });
+    expect(r.keystrokes.total).toMatchObject({ count: 1, median: 45 });
   });
 
-  it("matches keystrokes to renders FIFO when multiple are in flight", () => {
+  it("FIFO matches multiple in-flight keystrokes through stages", () => {
     const term = makeFakeTerm();
     tracker = createLatencyTracker(term);
+    // Type two chars, then receive both echoes, then parse both, then render both.
     term.emitData("a"); // sentAt = 1_000_000
     now += 10;
     term.emitData("b"); // sentAt = 1_000_010
-    now += 30;          // now = 1_000_040
-    term.emitRender(); // matches a, latency = 1_000_040 - 1_000_000 = 40ms
-    now += 20;          // now = 1_000_060
-    term.emitRender(); // matches b, latency = 1_000_060 - 1_000_010 = 50ms
-    const s = tracker.summary();
-    expect(s.count).toBe(2);
-    expect(s.samples).toEqual([40, 50]);
-    expect(s.pending).toBe(0);
+    now += 30;          // 30ms after b
+    tracker.recordRecv(1);  // a's recvAt — 40ms after a was sent
+    now += 5;
+    tracker.recordRecv(1);  // b's recvAt — 35ms after b was sent
+    now += 5;
+    term.emitParsed();      // a's parsedAt — 5ms parse for a
+    now += 2;
+    term.emitParsed();      // b's parsedAt — 7ms parse for b
+    now += 8;
+    term.emitRender();      // a's renderedAt — 10ms paint for a
+    now += 3;
+    term.emitRender();      // b's renderedAt — 11ms paint for b
+    const r = tracker.report();
+    expect(r.keystrokes.count).toBe(2);
+    // Stage-level aggregates: each stage's [a,b] sample list,
+    // sorted, picking ceil(2*0.5)-1 = idx 0:
+    //   network = [40, 35]  -> sorted [35, 40]  -> 35
+    //   parse   = [10, 7]   -> sorted [7, 10]   -> 7
+    //   paint   = [10, 11]  -> sorted [10, 11]  -> 10
+    expect(r.keystrokes.network.median).toBe(35);
+    expect(r.keystrokes.parse.median).toBe(7);
+    expect(r.keystrokes.paint.median).toBe(10);
   });
 
-  it("each char in a multi-char onData enqueues separately (paste)", () => {
+  it("an entry without recvAt yet is counted as pending, not as a sample", () => {
+    const term = makeFakeTerm();
+    tracker = createLatencyTracker(term);
+    term.emitData("x"); // pending: 1
+    expect(tracker.report().keystrokes.pending).toBe(1);
+    expect(tracker.report().keystrokes.count).toBe(0);
+    // Render fires without recv → no sample, no advance.
+    term.emitRender();
+    expect(tracker.report().keystrokes.pending).toBe(1);
+    expect(tracker.report().keystrokes.count).toBe(0);
+  });
+
+  it("each char in a multi-char onData enqueues separately", () => {
     const term = makeFakeTerm();
     tracker = createLatencyTracker(term);
     term.emitData("xyz");
-    expect(tracker.summary().pending).toBe(3);
-    now += 20;
-    term.emitRender();
-    now += 5;
-    term.emitRender();
-    now += 5;
-    term.emitRender();
-    const s = tracker.summary();
-    expect(s.count).toBe(3);
-    expect(s.pending).toBe(0);
-  });
-
-  it("renders without pending sends are no-ops (program output, not echo)", () => {
-    const term = makeFakeTerm();
-    tracker = createLatencyTracker(term);
-    term.emitRender();
-    term.emitRender();
-    expect(tracker.summary().count).toBe(0);
-    expect(tracker.summary().pending).toBe(0);
-  });
-
-  it("summary computes percentiles across the sample window", () => {
-    const term = makeFakeTerm();
-    tracker = createLatencyTracker(term);
-    // Inject samples with latencies: 10, 20, 30, 40, 50, 60, 70, 80, 90, 100
-    for (let i = 0; i < 10; i++) {
-      term.emitData("x");
-      now += (i + 1) * 10;
-      term.emitRender();
-      // Reset 'now' so each cycle's elapsed equals (i+1)*10 from the matching sentAt.
-    }
-    const s = tracker.summary();
-    expect(s.count).toBe(10);
-    expect(s.min).toBe(10);
-    expect(s.max).toBe(100);
-    // p50 with 10 samples lands on the 5th -> 50; p95 lands on the 9th -> 100.
-    expect(s.median).toBe(50);
-    expect(s.p95).toBe(100);
-  });
-
-  it("caps the rolling window at 200 samples", () => {
-    const term = makeFakeTerm();
-    tracker = createLatencyTracker(term);
-    for (let i = 0; i < 250; i++) {
-      term.emitData("x");
+    expect(tracker.report().keystrokes.pending).toBe(3);
+    // Walk all three through the pipeline.
+    for (let i = 0; i < 3; i++) {
       now += 10;
+      tracker.recordRecv(1);
+      now += 1;
+      term.emitParsed();
+      now += 5;
       term.emitRender();
     }
-    expect(tracker.summary().count).toBe(200);
+    expect(tracker.report().keystrokes.count).toBe(3);
+    expect(tracker.report().keystrokes.pending).toBe(0);
   });
 
-  it("reset() clears samples and pending and restarts the window timer", () => {
+  it("renders without pending entries are no-ops", () => {
     const term = makeFakeTerm();
     tracker = createLatencyTracker(term);
-    term.emitData("a");
-    now += 100;
     term.emitRender();
-    term.emitData("b"); // pending
-    now += 50;
-    expect(tracker.summary().count).toBe(1);
-    expect(tracker.summary().pending).toBe(1);
-    tracker.reset();
-    expect(tracker.summary().count).toBe(0);
-    expect(tracker.summary().pending).toBe(0);
+    term.emitRender();
+    expect(tracker.report().keystrokes.count).toBe(0);
+    expect(tracker.report().keystrokes.pending).toBe(0);
   });
 
-  it("destroy() unhooks the listeners — subsequent events are ignored", () => {
+  it("computes percentiles across the sample window", () => {
+    const term = makeFakeTerm();
+    tracker = createLatencyTracker(term);
+    // 10 samples with totals 10..100ms (network 10-100, parse=0, paint=0)
+    for (let i = 1; i <= 10; i++) {
+      fullStroke(term, i * 10, 0, 0);
+    }
+    const r = tracker.report();
+    expect(r.keystrokes.count).toBe(10);
+    expect(r.keystrokes.total.min).toBe(10);
+    expect(r.keystrokes.total.max).toBe(100);
+    // Nearest-rank: ceil(10*0.5)-1 = 4 -> [50]; ceil(10*0.95)-1 = 9 -> [100]
+    expect(r.keystrokes.total.median).toBe(50);
+    expect(r.keystrokes.total.p95).toBe(100);
+  });
+
+  it("caps the rolling sample window at 200", () => {
+    const term = makeFakeTerm();
+    tracker = createLatencyTracker(term);
+    for (let i = 0; i < 250; i++) fullStroke(term, 10, 1, 1);
+    expect(tracker.report().keystrokes.count).toBe(200);
+  });
+
+  it("reset() clears samples + pending + ws state", () => {
+    const term = makeFakeTerm();
+    tracker = createLatencyTracker(term);
+    fullStroke(term, 10, 1, 1);
+    term.emitData("y"); // pending
+    tracker.recordRecv(8); // ws frame
+    expect(tracker.report().keystrokes.count).toBe(1);
+    expect(tracker.report().keystrokes.pending).toBe(1);
+    expect(tracker.report().ws.count).toBe(2); // 1 from fullStroke, 1 from above
+    tracker.reset();
+    expect(tracker.report().keystrokes.count).toBe(0);
+    expect(tracker.report().keystrokes.pending).toBe(0);
+    expect(tracker.report().ws.count).toBe(0);
+  });
+
+  it("destroy() unhooks listeners", () => {
     const term = makeFakeTerm();
     tracker = createLatencyTracker(term);
     tracker.destroy();
     term.emitData("a");
+    tracker.recordRecv(8);
+    term.emitParsed();
     term.emitRender();
-    expect(tracker.summary().count).toBe(0);
-    tracker = null; // disable afterEach destroy
+    expect(tracker.report().keystrokes.count).toBe(0);
+    tracker = null;
   });
 });
 
-describe("formatSummary", () => {
-  it("includes count, pending, latencies, and supplied context", () => {
-    const out = formatSummary(
-      {
-        count: 42,
-        pending: 3,
-        min: 10,
-        median: 25,
-        p95: 80,
-        max: 120,
-        samples: [],
-        windowSec: 30,
-      },
-      { ua: "Chrome/Mac", relay: "tailscale", viewportW: 1280, viewportH: 800 }
-    );
-    expect(out).toContain("samples: 42");
-    expect(out).toContain("pending: 3");
-    expect(out).toContain("median: 25ms");
-    expect(out).toContain("p95: 80ms");
-    expect(out).toContain("ua: Chrome/Mac");
-    expect(out).toContain("relay: tailscale");
-    expect(out).toContain("viewport: 1280×800");
-  });
-
-  it("notes when no samples yet", () => {
-    const out = formatSummary({
-      count: 0,
-      pending: 0,
-      min: 0,
-      median: 0,
-      p95: 0,
-      max: 0,
-      samples: [],
-      windowSec: 0,
-    });
-    expect(out).toContain("no samples yet");
-  });
-});
-
-describe("recordRecv + WS frame stats", () => {
-  it("captures one entry per recordRecv call with the supplied byte size", () => {
+describe("WS frame stats", () => {
+  it("captures per-frame size + inter-arrival", () => {
     const term = makeFakeTerm();
     tracker = createLatencyTracker(term);
     tracker.recordRecv(64);
-    now += 50;
+    now += 100;
     tracker.recordRecv(128);
-    now += 30;
+    now += 50;
     tracker.recordRecv(32);
     const r = tracker.report();
     expect(r.ws.count).toBe(3);
     expect(r.ws.sizes).toEqual([64, 128, 32]);
-  });
-
-  it("inter-arrival deltas have count - 1 entries (no leading zero)", () => {
-    const term = makeFakeTerm();
-    tracker = createLatencyTracker(term);
-    tracker.recordRecv(10); // arrival 0
-    now += 100;
-    tracker.recordRecv(10); // arrival 1, +100ms
-    now += 50;
-    tracker.recordRecv(10); // arrival 2, +50ms
-    const r = tracker.report();
     expect(r.ws.interArrivalMs).toEqual([100, 50]);
   });
 
-  it("reset() clears WS frame state too", () => {
-    const term = makeFakeTerm();
-    tracker = createLatencyTracker(term);
-    tracker.recordRecv(10);
-    tracker.recordRecv(20);
-    expect(tracker.report().ws.count).toBe(2);
-    tracker.reset();
-    expect(tracker.report().ws.count).toBe(0);
-    expect(tracker.report().ws.sizes).toEqual([]);
-  });
-
-  it("WS frame ring-buffer is independently capped at 200", () => {
+  it("WS ring caps independently at 200", () => {
     const term = makeFakeTerm();
     tracker = createLatencyTracker(term);
     for (let i = 0; i < 250; i++) tracker.recordRecv(10);
@@ -255,45 +243,44 @@ describe("recordRecv + WS frame stats", () => {
   });
 });
 
-describe("report()", () => {
-  it("includes wall-clock startedAt/endedAt timestamps", () => {
+describe("summary() (compact total view)", () => {
+  it("matches keystroke total stats", () => {
     const term = makeFakeTerm();
-    const t0 = Date.now();
     tracker = createLatencyTracker(term);
-    const r = tracker.report();
-    expect(r.startedAt).toBeGreaterThanOrEqual(t0);
-    expect(r.endedAt).toBeGreaterThanOrEqual(r.startedAt);
+    fullStroke(term, 30, 5, 10); // total 45
+    fullStroke(term, 60, 5, 10); // total 75
+    const s = tracker.summary();
+    expect(s.count).toBe(2);
+    expect(s.median).toBe(45); // n=2 nearest-rank lower
+    expect(s.max).toBe(75);
   });
+});
 
-  it("composes keystroke summary + ws frame stats together", () => {
-    const term = makeFakeTerm();
-    tracker = createLatencyTracker(term);
-    term.emitData("a");
-    now += 50;
-    term.emitRender();
-    tracker.recordRecv(80);
-    const r = tracker.report();
-    expect(r.keystrokes.count).toBe(1);
-    expect(r.keystrokes.median).toBe(50);
-    expect(r.ws.count).toBe(1);
-    expect(r.ws.sizes).toEqual([80]);
+describe("formatSummary", () => {
+  it("includes count, pending, latencies, supplied context", () => {
+    const out = formatSummary(
+      {
+        count: 42, pending: 3, min: 10, median: 25, p95: 80, max: 120, windowSec: 30,
+      },
+      { ua: "Chrome/Mac", relay: "tailscale", viewportW: 1280, viewportH: 800 }
+    );
+    expect(out).toContain("samples: 42");
+    expect(out).toContain("median: 25ms");
+    expect(out).toContain("ua: Chrome/Mac");
+    expect(out).toContain("viewport: 1280×800");
   });
 });
 
 describe("formatCompact", () => {
   it("returns n=0 with no samples", () => {
     expect(
-      formatCompact({
-        count: 0, pending: 0, min: 0, median: 0, p95: 0, max: 0, samples: [], windowSec: 0,
-      })
+      formatCompact({ count: 0, pending: 0, min: 0, median: 0, p95: 0, max: 0, windowSec: 0 })
     ).toBe("n=0");
   });
 
   it("returns a one-liner with median and p95", () => {
     expect(
-      formatCompact({
-        count: 12, pending: 0, min: 5, median: 22.4, p95: 60, max: 90, samples: [], windowSec: 5,
-      })
+      formatCompact({ count: 12, pending: 0, min: 5, median: 22.4, p95: 60, max: 90, windowSec: 5 })
     ).toBe("n=12 p50=22.4ms p95=60ms");
   });
 });
