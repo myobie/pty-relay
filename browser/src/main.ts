@@ -1239,17 +1239,10 @@ textSendBtn.addEventListener("click", () => {
     setTimeout(() => sendKey("\r"), 50);
   }
 });
-textInput.addEventListener("keydown", (e: KeyboardEvent) => {
-  // Plain Enter submits; Shift+Enter (or any modified Enter) inserts
-  // a newline naturally — this mirrors Claude Code / Codex / Cursor's
-  // chat-input convention. The submit path runs the bracketed-paste
-  // pipeline, so multiline input is sent as one paste + a single
-  // Return.
-  if (e.key === "Enter" && !e.shiftKey && !e.metaKey && !e.ctrlKey && !e.altKey) {
-    e.preventDefault();
-    (textSendBtn as HTMLButtonElement).click();
-  }
-});
+// No special Enter handling: Enter inserts a newline naturally
+// (textarea default). Submit is explicit via the Send button —
+// matches mobile keyboards where the Return key is right there
+// and it's natural to use it for newlines mid-typing.
 textBackBtn.addEventListener("click", () => setKbMode("bar"));
 kbReopen.addEventListener("click", () => setKbMode("bar"));
 buildQuickBar();

@@ -1577,12 +1577,6 @@ textSendBtn.addEventListener("click", () => {
     setTimeout(() => sendKey("\r"), 50);
   }
 });
-textInput.addEventListener("keydown", (e) => {
-  if (e.key === "Enter" && !e.shiftKey && !e.metaKey && !e.ctrlKey && !e.altKey) {
-    e.preventDefault();
-    textSendBtn.click();
-  }
-});
 textBackBtn.addEventListener("click", () => setKbMode("bar"));
 kbReopen.addEventListener("click", () => setKbMode("bar"));
 buildQuickBar();
