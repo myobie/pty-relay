@@ -419,6 +419,30 @@ const detachBtn = document.getElementById("detach-btn")!;
 const statsBtn = document.getElementById("stats-btn")!;
 const latencyStatEl = document.getElementById("latency-stat")!;
 
+/** Read runtime config injected by the daemon as
+ *  <meta name="pty-relay-config" content='{"latencyStats":true}'>.
+ *  Defaults to all-features-off when the meta is missing or
+ *  unparseable, which is also the right behavior when the page is
+ *  served from a static host (e.g. the static fallback). */
+const runtimeConfig = (() => {
+  const meta = document.querySelector('meta[name="pty-relay-config"]');
+  const fallback = { latencyStats: false };
+  if (!meta) return fallback;
+  try {
+    const parsed = JSON.parse(meta.getAttribute("content") || "{}");
+    return { latencyStats: !!parsed.latencyStats };
+  } catch {
+    return fallback;
+  }
+})();
+
+// If the operator hasn't opted into latency telemetry, hide the
+// toolbar widgets entirely so the feature is invisible to end users.
+if (!runtimeConfig.latencyStats) {
+  statsBtn.style.display = "none";
+  latencyStatEl.style.display = "none";
+}
+
 type View = "loading" | "sessions" | "terminal";
 
 function showView(view: View): void {
@@ -499,6 +523,11 @@ const LATENCY_TICK_MS = 1000;
 const LATENCY_REPORT_INTERVAL_MS = 30_000;
 
 function bindLatencyTracker(t: Terminal): void {
+  // Opt-in: if the daemon wasn't started with --latency-stats, we
+  // skip the entire tracker — no event hooks, no periodic flush, no
+  // recordRecv calls (those check latencyTracker first). The toolbar
+  // widgets are also hidden up top.
+  if (!runtimeConfig.latencyStats) return;
   if (latencyTracker) latencyTracker.destroy();
   latencyTracker = createLatencyTracker(t);
   if (latencyTickHandle) clearInterval(latencyTickHandle);

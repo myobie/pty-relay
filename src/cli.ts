@@ -81,6 +81,13 @@ Options:
                                    (for non-interactive startup, e.g. a pty session)
   --auto-approve            Skip client approval (allow all connections)
   --tailscale               Enable Tailscale HTTPS via 'tailscale serve'
+  --latency-stats           Enable web-UI latency telemetry. Adds a
+                             toolbar indicator + Stats button in the
+                             web viewer, and the daemon writes one
+                             JSONL line every 30s to <configDir>/
+                             latency.jsonl (rotates at 10 MB to .old).
+                             OFF by default — opt in only when actively
+                             debugging perceived input lag.
   --bind <addr>             Address the HTTP/WS server binds to. Defaults to
                              127.0.0.1 when --tailscale is set (tailscale serve
                              proxies tailnet -> 127.0.0.1:port), otherwise binds
@@ -959,6 +966,7 @@ async function dispatchLocal(): Promise<void> {
     }
     const tailscale = hasFlag("--tailscale");
     const autoApprove = hasFlag("--auto-approve");
+    const latencyStats = hasFlag("--latency-stats");
     // Default bind: loopback when --tailscale is set (tailscale serve
     // proxies tailnet -> 127.0.0.1:port). Otherwise leave undefined to
     // preserve the historical all-interfaces behavior for non-tailscale
@@ -975,6 +983,7 @@ async function dispatchLocal(): Promise<void> {
       autoApprove,
       passphraseFile,
       bind,
+      latencyStats,
     });
     return;
   }

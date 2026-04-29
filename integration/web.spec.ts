@@ -152,6 +152,24 @@ test.describe("web UI via self-hosted relay", () => {
     await expect(label).toHaveText(ptySession.name);
   });
 
+  test("latency telemetry is OFF by default (no Stats button, no jsonl write)", async ({ page }) => {
+    await page.goto(tokenUrl);
+    await waitForTerminalText(page, "$");
+
+    // The toolbar widgets should be invisible — daemon was started
+    // without --latency-stats, so the meta config says off.
+    await expect(page.locator("#stats-btn")).toBeHidden();
+    await expect(page.locator("#latency-stat")).toBeHidden();
+
+    // Read the runtime config off the meta tag to confirm the daemon
+    // injected the right value.
+    const config = await page.evaluate(() => {
+      const m = document.querySelector('meta[name="pty-relay-config"]');
+      return m?.getAttribute("content");
+    });
+    expect(config).toContain('"latencyStats":false');
+  });
+
   test("document.title reflects terminal OSC 2 title (and falls back to session name)", async ({ page }) => {
     await page.goto(tokenUrl);
     await waitForTerminalText(page, "$");

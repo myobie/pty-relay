@@ -843,6 +843,21 @@ var terminalContainer = document.getElementById("terminal-container");
 var detachBtn = document.getElementById("detach-btn");
 var statsBtn = document.getElementById("stats-btn");
 var latencyStatEl = document.getElementById("latency-stat");
+var runtimeConfig = (() => {
+  const meta = document.querySelector('meta[name="pty-relay-config"]');
+  const fallback = { latencyStats: false };
+  if (!meta) return fallback;
+  try {
+    const parsed = JSON.parse(meta.getAttribute("content") || "{}");
+    return { latencyStats: !!parsed.latencyStats };
+  } catch {
+    return fallback;
+  }
+})();
+if (!runtimeConfig.latencyStats) {
+  statsBtn.style.display = "none";
+  latencyStatEl.style.display = "none";
+}
 function showView(view) {
   statusOverlay.style.display = "none";
   sessionListEl.style.display = "none";
@@ -886,6 +901,7 @@ var latencyReportHandle = null;
 var LATENCY_TICK_MS = 1e3;
 var LATENCY_REPORT_INTERVAL_MS = 3e4;
 function bindLatencyTracker(t) {
+  if (!runtimeConfig.latencyStats) return;
   if (latencyTracker) latencyTracker.destroy();
   latencyTracker = createLatencyTracker(t);
   if (latencyTickHandle) clearInterval(latencyTickHandle);

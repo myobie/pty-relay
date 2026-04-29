@@ -66,6 +66,13 @@ export async function start(
     autoApprove?: boolean;
     passphraseFile?: string;
     bind?: string;
+    /** When true: web UI runs the latency tracker, shows the
+     *  toolbar indicator + Stats button, and posts reports to the
+     *  daemon every 30s; daemon appends to <configDir>/latency.jsonl.
+     *  When false (default): tracker is not even instantiated in the
+     *  browser, toolbar widgets are hidden, and the daemon drops
+     *  any latency_report messages without writing anything. */
+    latencyStats?: boolean;
   }
 ): Promise<void> {
   log("cli", "local start begin", {
@@ -75,6 +82,7 @@ export async function start(
     autoApprove: !!options?.autoApprove,
     allowNewSessions: !!options?.allowNewSessions,
     bind: options?.bind,
+    latencyStats: !!options?.latencyStats,
   });
   const relay = `localhost:${port}`;
   const { config, secretHash, store } = await loadDaemonConfig(
@@ -87,7 +95,9 @@ export async function start(
 
   // Start the relay server, serving the web UI from the bundled browser client
   const htmlPath = path.resolve(import.meta.dirname, "../../browser/dist/index.html");
-  const server = createRelayServer(port, htmlPath, options?.bind);
+  const server = createRelayServer(port, htmlPath, options?.bind, {
+    latencyStats: !!options?.latencyStats,
+  });
   await server.start();
 
   const tokenUrl = getTokenUrl(relay, config);
@@ -167,6 +177,10 @@ export async function start(
       // typing = ~500KB/hr; 10MB ≈ 20 hours of active data, plenty
       // for a debugging session.
       if (msg.type === "latency_report") {
+        // Gated on --latency-stats. Without the flag we drop the
+        // message silently — the web UI shouldn't be able to write
+        // to an opted-out operator's disk.
+        if (!options?.latencyStats) return true;
         const dir = configDir ?? defaultConfigDir();
         const file = path.join(dir, "latency.jsonl");
         const line = JSON.stringify({

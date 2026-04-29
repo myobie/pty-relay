@@ -16,13 +16,42 @@ import { log } from "../log.ts";
  * - client connects with role=client -> gets assigned a client_id
  * - daemon connects with role=daemon&client_id=X -> per-client data socket
  */
-export function createRelayServer(port: number, htmlPath?: string, host?: string) {
+export interface RelayServerOptions {
+  /** When true, serve index.html with `<meta name="pty-relay-config"
+   *  content='{"latencyStats":true}'>` injected so the web UI runs
+   *  the latency tracker. When false (default), the web UI sees
+   *  `latencyStats:false` and skips all telemetry. */
+  latencyStats?: boolean;
+}
+
+export function createRelayServer(
+  port: number,
+  htmlPath?: string,
+  host?: string,
+  serverOpts: RelayServerOptions = {}
+) {
   const registry = new PairingRegistry();
 
-  // Read HTML for web UI serving
+  // Read HTML for web UI serving. Inject the runtime config as a
+  // <meta> tag so the web UI can read it on init. We do this once at
+  // startup since index.html is already cached in memory; the price
+  // of that caching is that toggling the flag requires a daemon
+  // restart, which is fine for an opt-in dev/debug feature.
   let html = "<html><body>pty-relay self-hosted</body></html>";
   if (htmlPath && fs.existsSync(htmlPath)) {
     html = fs.readFileSync(htmlPath, "utf-8");
+    const config = JSON.stringify({
+      latencyStats: !!serverOpts.latencyStats,
+    });
+    const metaTag = `<meta name="pty-relay-config" content='${config}'>`;
+    // Inject right before </head> so the meta is parsed before main.js
+    // runs. If the placeholder isn't present (different HTML), append
+    // before </body> as a fallback so we never silently drop the config.
+    if (html.includes("</head>")) {
+      html = html.replace("</head>", `  ${metaTag}\n</head>`);
+    } else if (html.includes("</body>")) {
+      html = html.replace("</body>", `${metaTag}\n</body>`);
+    }
   }
 
   // Directory containing the built web UI (index.html, main.js, vendor/).
