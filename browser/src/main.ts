@@ -628,6 +628,23 @@ function teardownTentativeTyping(): void {
   }
 }
 
+// OSC 9 / 777 -> system Notification, with toast fallback. Always-on;
+// the notify() helper handles permission prompts + Android/iOS
+// fallback gracefully.
+let notificationDisposer: { dispose(): void } | null = null;
+
+function bindNotifications(t: Terminal): void {
+  if (notificationDisposer) notificationDisposer.dispose();
+  notificationDisposer = registerNotificationOscHandlers(t, () => document.title);
+}
+
+function teardownNotifications(): void {
+  if (notificationDisposer) {
+    notificationDisposer.dispose();
+    notificationDisposer = null;
+  }
+}
+
 /** Update the health-indicator dot from current state. Pure read of
  *  module-level vars; safe to call from any tick. Lives outside the
  *  latency tracker because the indicator should work even when
@@ -748,6 +765,7 @@ function disconnect(): void {
   document.title = DEFAULT_DOC_TITLE;
   teardownLatencyTracker();
   teardownTentativeTyping();
+  teardownNotifications();
   stopHealthTick();
   if (term) {
     term.dispose();
@@ -802,6 +820,7 @@ function attachToSession(sessionName: string, _cols: number, _rows: number): voi
     bindTerminalTitle(term, sessionName);
     bindLatencyTracker(term);
     bindTentativeTyping(term);
+    bindNotifications(term);
   }
   sendJson({
     type: "attach",
@@ -855,6 +874,7 @@ function handleDecryptedMessage(plaintext: Uint8Array): void {
           bindTerminalTitle(term, msg.session);
           bindLatencyTracker(term);
           bindTentativeTyping(term);
+    bindNotifications(term);
         }
         return;
       } else if (msg.type === "sessions") {
@@ -915,6 +935,7 @@ import {
   tentativeEnabled,
   type TentativeController,
 } from "./tentative-typing.ts";
+import { registerOscHandlers as registerNotificationOscHandlers } from "./notifications.ts";
 
 function spawnSession(name: string, cwd?: string): void {
   showStatus("Starting session...");
@@ -978,6 +999,7 @@ detachBtn.addEventListener("click", () => {
   packetParser = new PacketParser();
   teardownLatencyTracker();
   teardownTentativeTyping();
+  teardownNotifications();
   if (term) {
     term.dispose();
     term = null;

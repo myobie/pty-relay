@@ -649,6 +649,115 @@ function tentativeEnabled() {
   }
 }
 
+// browser/src/toast.ts
+var STACK_ID = "pty-toast-stack";
+var TOAST_DURATION_MS = 6e3;
+var ANIM_MS = 200;
+function ensureStack() {
+  let stack = document.getElementById(STACK_ID);
+  if (!stack) {
+    stack = document.createElement("div");
+    stack.id = STACK_ID;
+    document.body.appendChild(stack);
+  }
+  return stack;
+}
+function showToast(title, body, opts = {}) {
+  const stack = ensureStack();
+  const el = document.createElement("div");
+  el.className = "pty-toast";
+  const titleEl = document.createElement("div");
+  titleEl.className = "pty-toast-title";
+  titleEl.textContent = title;
+  el.appendChild(titleEl);
+  if (body) {
+    const bodyEl = document.createElement("div");
+    bodyEl.className = "pty-toast-body";
+    bodyEl.textContent = body;
+    el.appendChild(bodyEl);
+  }
+  let dismissed = false;
+  function dismiss() {
+    if (dismissed) return;
+    dismissed = true;
+    el.classList.add("pty-toast-dismissing");
+    setTimeout(() => el.remove(), ANIM_MS);
+  }
+  el.addEventListener("click", dismiss);
+  const duration = opts.durationMs ?? TOAST_DURATION_MS;
+  if (duration > 0) {
+    setTimeout(dismiss, duration);
+  }
+  stack.appendChild(el);
+}
+
+// browser/src/notifications.ts
+var COOLDOWN_MS = 1e3;
+var lastNotificationAt = 0;
+var permissionEnsured = false;
+async function ensurePermission() {
+  if (permissionEnsured) return Notification.permission === "granted";
+  if (typeof Notification === "undefined") return false;
+  if (Notification.permission === "denied") {
+    permissionEnsured = true;
+    return false;
+  }
+  if (Notification.permission === "granted") {
+    permissionEnsured = true;
+    return true;
+  }
+  try {
+    const result = await Notification.requestPermission();
+    permissionEnsured = true;
+    return result === "granted";
+  } catch {
+    return false;
+  }
+}
+async function notify(title, body) {
+  const now = Date.now();
+  if (now - lastNotificationAt < COOLDOWN_MS) return "throttled";
+  lastNotificationAt = now;
+  const granted = await ensurePermission();
+  if (granted) {
+    try {
+      new Notification(title, { body });
+      return "system";
+    } catch {
+    }
+  }
+  showToast(title, body);
+  return "toast";
+}
+function registerOscHandlers(term2, fallbackTitle) {
+  const osc9 = term2.parser.registerOscHandler(9, (data) => {
+    notify(fallbackTitle() || "Notification", data);
+    return true;
+  });
+  const osc777 = term2.parser.registerOscHandler(777, (data) => {
+    const semi = data.indexOf(";");
+    if (semi === -1) return false;
+    const subtype = data.slice(0, semi);
+    if (subtype !== "notify") return false;
+    const rest = data.slice(semi + 1);
+    const semi2 = rest.indexOf(";");
+    if (semi2 === -1) {
+      notify(rest || fallbackTitle() || "Notification", "");
+    } else {
+      const title = rest.slice(0, semi2);
+      const body = rest.slice(semi2 + 1);
+      notify(title || fallbackTitle() || "Notification", body);
+    }
+    return true;
+  });
+  return {
+    dispose() {
+      osc9.dispose();
+      osc777.dispose();
+    }
+  };
+}
+
 // browser/src/main.ts
 var MSG_DATA = 0;
 var MSG_DETACH = 2;
@@ -1068,6 +1177,17 @@ function teardownTentativeTyping() {
     tentativeController = null;
   }
 }
+var notificationDisposer = null;
+function bindNotifications(t) {
+  if (notificationDisposer) notificationDisposer.dispose();
+  notificationDisposer = registerOscHandlers(t, () => document.title);
+}
+function teardownNotifications() {
+  if (notificationDisposer) {
+    notificationDisposer.dispose();
+    notificationDisposer = null;
+  }
+}
 function updateHealthIndicator() {
   const summary = latencyTracker?.summary();
   const inputs = {
@@ -1166,6 +1286,7 @@ function disconnect() {
   document.title = DEFAULT_DOC_TITLE;
   teardownLatencyTracker();
   teardownTentativeTyping();
+  teardownNotifications();
   stopHealthTick();
   if (term) {
     term.dispose();
@@ -1213,6 +1334,7 @@ function attachToSession(sessionName, _cols, _rows) {
     bindTerminalTitle(term, sessionName);
     bindLatencyTracker(term);
     bindTentativeTyping(term);
+    bindNotifications(term);
   }
   sendJson({
     type: "attach",
@@ -1261,6 +1383,7 @@ function handleDecryptedMessage(plaintext) {
           bindTerminalTitle(term, msg.session);
           bindLatencyTracker(term);
           bindTentativeTyping(term);
+          bindNotifications(term);
         }
         return;
       } else if (msg.type === "sessions") {
@@ -1347,6 +1470,7 @@ detachBtn.addEventListener("click", () => {
   packetParser = new PacketParser();
   teardownLatencyTracker();
   teardownTentativeTyping();
+  teardownNotifications();
   if (term) {
     term.dispose();
     term = null;
