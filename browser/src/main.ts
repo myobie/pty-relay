@@ -512,6 +512,26 @@ function bindTerminalTitle(t: Terminal, fallbackName: string): void {
   });
 }
 
+/** Defensive multi-pass fit. xterm.js + the WebGL renderer + FitAddon
+ *  can disagree about cell dimensions on the first measurement
+ *  (WebGL hasn't fully measured the font yet, retina rounding,
+ *  flex layout still resolving). When that happens, term.cols/rows
+ *  end up smaller than the rendered canvas — TUI programs (vim, hx,
+ *  less) draw into the smaller area and the rest looks empty.
+ *
+ *  Fix: fit immediately, then fit again on the next macrotask, then
+ *  a third time after first render. The redundant calls are cheap
+ *  (each one early-returns if nothing changed) and self-correcting
+ *  if any prior measurement was stale. */
+function settledFit(term: Terminal, fit: FitAddon): void {
+  fit.fit();
+  setTimeout(() => fit.fit(), 0);
+  const onceDisposer = term.onRender(() => {
+    fit.fit();
+    onceDisposer.dispose();
+  });
+}
+
 /** Shared options for every Terminal we construct. Two creation
  *  sites (attach + spawn) used to drift; extracting keeps font,
  *  scroll, theme aligned. */
@@ -768,7 +788,7 @@ function attachToSession(sessionName: string, _cols: number, _rows: number): voi
     term.loadAddon(fitAddon);
     term.open(terminalContainer as HTMLElement);
     loadWebglRenderer(term);
-    fitAddon.fit();
+    settledFit(term, fitAddon);
     resizeObserver = new ResizeObserver(() => {
       if (fitAddon && term) fitAddon.fit();
     });
@@ -821,7 +841,7 @@ function handleDecryptedMessage(plaintext: Uint8Array): void {
           term.loadAddon(fitAddon);
           term.open(terminalContainer as HTMLElement);
           loadWebglRenderer(term);
-          fitAddon.fit();
+          settledFit(term, fitAddon);
           resizeObserver = new ResizeObserver(() => {
             if (fitAddon && term) fitAddon.fit();
           });

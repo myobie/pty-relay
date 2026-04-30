@@ -1010,6 +1010,14 @@ function bindTerminalTitle(t, fallbackName) {
     document.title = title && title.length > 0 ? title : fallbackName;
   });
 }
+function settledFit(term2, fit) {
+  fit.fit();
+  setTimeout(() => fit.fit(), 0);
+  const onceDisposer = term2.onRender(() => {
+    fit.fit();
+    onceDisposer.dispose();
+  });
+}
 var TERMINAL_OPTIONS = {
   cursorBlink: true,
   fontSize: 14,
@@ -1191,7 +1199,7 @@ function attachToSession(sessionName, _cols, _rows) {
     term.loadAddon(fitAddon);
     term.open(terminalContainer);
     loadWebglRenderer(term);
-    fitAddon.fit();
+    settledFit(term, fitAddon);
     resizeObserver = new ResizeObserver(() => {
       if (fitAddon && term) fitAddon.fit();
     });
@@ -1239,7 +1247,7 @@ function handleDecryptedMessage(plaintext) {
           term.loadAddon(fitAddon);
           term.open(terminalContainer);
           loadWebglRenderer(term);
-          fitAddon.fit();
+          settledFit(term, fitAddon);
           resizeObserver = new ResizeObserver(() => {
             if (fitAddon && term) fitAddon.fit();
           });
