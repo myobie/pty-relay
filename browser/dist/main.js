@@ -721,7 +721,11 @@ async function notify(title, body) {
   const granted = await ensurePermission();
   if (granted) {
     try {
-      new Notification(title, { body });
+      const n = new Notification(title, { body });
+      n.onclick = () => {
+        window.focus();
+        n.close();
+      };
       return "system";
     } catch {
     }
@@ -1157,9 +1161,16 @@ var packetParser = new PacketParser();
 var resizeObserver = null;
 var sessionAttached = false;
 var DEFAULT_DOC_TITLE = "pty relay";
-function setUrlSession(session) {
+function setUrlSession(session, mode = "replace") {
   const newPath = session ? `/${encodeURIComponent(session)}` : "/";
-  history.replaceState(null, "", newPath + location.search + location.hash);
+  const fullUrl = newPath + location.search + location.hash;
+  const currentUrl = location.pathname + location.search + location.hash;
+  if (currentUrl === fullUrl) return;
+  if (mode === "push") {
+    history.pushState(null, "", fullUrl);
+  } else {
+    history.replaceState(null, "", fullUrl);
+  }
 }
 function bindTerminalTitle(t, fallbackName) {
   t.onTitleChange((title) => {
@@ -1358,7 +1369,7 @@ function disconnect() {
 function attachToSession(sessionName, _cols, _rows) {
   currentSession = sessionName;
   sessionNameLabel.textContent = sessionName;
-  setUrlSession(sessionName);
+  setUrlSession(sessionName, "push");
   document.title = sessionName;
   showView("terminal");
   if (!term) {
@@ -1408,7 +1419,7 @@ function handleDecryptedMessage(plaintext) {
         currentSession = msg.session;
         sessionNameLabel.textContent = msg.session;
         document.title = msg.session;
-        setUrlSession(msg.session);
+        setUrlSession(msg.session, "push");
         showView("terminal");
         if (!term) {
           term = new Terminal(TERMINAL_OPTIONS);
@@ -1531,6 +1542,26 @@ detachBtn.addEventListener("click", () => {
   }
   showStatus("Loading sessions...");
   sendJson({ type: "list" });
+});
+var popstateTimer = null;
+function syncViewToUrl() {
+  const pathSession = decodeURIComponent(location.pathname.slice(1));
+  if (pathSession) {
+    if (currentSession !== pathSession) {
+      const cols = Math.floor(terminalContainer.clientWidth / 9) || 80;
+      const rows = Math.floor(terminalContainer.clientHeight / 17) || 24;
+      attachToSession(pathSession, cols, rows);
+    }
+  } else if (sessionAttached) {
+    detachBtn.click();
+  }
+}
+window.addEventListener("popstate", () => {
+  if (popstateTimer) clearTimeout(popstateTimer);
+  popstateTimer = setTimeout(() => {
+    popstateTimer = null;
+    syncViewToUrl();
+  }, 50);
 });
 var quickBar = document.getElementById("quick-bar");
 var keyPanel = document.getElementById("key-panel");

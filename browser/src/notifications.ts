@@ -63,7 +63,15 @@ export async function notify(
   const granted = await ensurePermission();
   if (granted) {
     try {
-      new Notification(title, { body });
+      const n = new Notification(title, { body });
+      // Tapping/clicking the notification focuses our tab — the
+      // click counts as a user gesture so window.focus() is allowed
+      // even when the tab is in the background. Close after focusing
+      // so the notification doesn't linger; user already saw it.
+      n.onclick = () => {
+        window.focus();
+        n.close();
+      };
       return "system";
     } catch {
       // Constructor throws on Android Chrome / iOS — fall through.

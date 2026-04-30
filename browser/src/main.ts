@@ -497,13 +497,30 @@ const DEFAULT_DOC_TITLE = "pty relay";
  *  window title. Falls back to the session name if the program clears
  *  the title (empty OSC). */
 /** Update the URL's path to reflect the currently-attached session
- *  (or clear it back to /). Uses history.replaceState — refresh
- *  stays in the same session, but back button still does what the
- *  user expects (no extra entries pushed into the history stack).
- *  The fragment (which holds the secret) is preserved verbatim. */
-function setUrlSession(session: string | null): void {
+ *  (or clear it back to /). The fragment (which holds the secret)
+ *  is preserved verbatim.
+ *
+ *  mode="push" creates a new history entry so the browser's back
+ *  button can return to the previous URL — used when the user
+ *  navigates INTO a session (overview click, spawn). mode="replace"
+ *  updates the URL without a history entry — used when leaving a
+ *  session (Detach button, MSG_EXIT) so we don't pollute the
+ *  history stack with "now you're on the overview" pseudo-pages.
+ *
+ *  No-op when the URL is already what we'd set; that protects the
+ *  push path from creating duplicate consecutive entries (e.g. when
+ *  auto-attach reads the URL on load and would otherwise push the
+ *  same path the browser already has). */
+function setUrlSession(session: string | null, mode: "push" | "replace" = "replace"): void {
   const newPath = session ? `/${encodeURIComponent(session)}` : "/";
-  history.replaceState(null, "", newPath + location.search + location.hash);
+  const fullUrl = newPath + location.search + location.hash;
+  const currentUrl = location.pathname + location.search + location.hash;
+  if (currentUrl === fullUrl) return;
+  if (mode === "push") {
+    history.pushState(null, "", fullUrl);
+  } else {
+    history.replaceState(null, "", fullUrl);
+  }
 }
 
 function bindTerminalTitle(t: Terminal, fallbackName: string): void {
@@ -792,10 +809,12 @@ function attachToSession(sessionName: string, _cols: number, _rows: number): voi
   currentSession = sessionName;
   sessionNameLabel.textContent = sessionName;
   // Stick the session into the URL so refresh keeps you here instead
-  // of dumping back to the overview. setUrlSession is replaceState
-  // (no history-stack entry) and preserves the fragment that holds
-  // the secret.
-  setUrlSession(sessionName);
+  // of dumping back to the overview. Use pushState so the browser's
+  // back button can return to wherever the user came from
+  // (overview, or a previous session). The no-op-on-match guard in
+  // setUrlSession prevents duplicate entries when the URL already
+  // matches (auto-attach from bookmark URL).
+  setUrlSession(sessionName, "push");
   // Default tab title to the session name on attach. If the running
   // program emits OSC 0/2 we'll override via bindTerminalTitle below.
   document.title = sessionName;
@@ -852,7 +871,9 @@ function handleDecryptedMessage(plaintext: Uint8Array): void {
         currentSession = msg.session;
         sessionNameLabel.textContent = msg.session;
         document.title = msg.session;
-        setUrlSession(msg.session);
+        // Spawn = navigation into a session, push so back returns
+        // to the overview (or previous session).
+        setUrlSession(msg.session, "push");
         showView("terminal");
         if (!term) {
           term = new Terminal(TERMINAL_OPTIONS);
@@ -1013,6 +1034,44 @@ detachBtn.addEventListener("click", () => {
   }
   showStatus("Loading sessions...");
   sendJson({ type: "list" });
+});
+
+// ── Browser back/forward navigation ──
+//
+// When the user hits the back/forward button, location.pathname
+// changes but no other JS event fires — popstate is our hook.
+// Sync our view to the URL: if the URL says we should be on a
+// session and we're not attached to that one, switch; if it says
+// the overview and we're attached, detach.
+//
+// Debounce so rapid back/forward (mashing the button) collapses to
+// "act on the final URL state" instead of chasing every transition.
+// Without this, a quick back-then-forward could fire two popstates
+// while attach/detach are mid-flight, causing tangled async state.
+// 50ms is sub-frame for a single press but enough to coalesce a
+// burst.
+//
+// setUrlSession's "no-op when URL already matches" guard prevents
+// attach/detach itself from pushing duplicate history entries.
+let popstateTimer: ReturnType<typeof setTimeout> | null = null;
+function syncViewToUrl(): void {
+  const pathSession = decodeURIComponent(location.pathname.slice(1));
+  if (pathSession) {
+    if (currentSession !== pathSession) {
+      const cols = Math.floor(terminalContainer.clientWidth / 9) || 80;
+      const rows = Math.floor(terminalContainer.clientHeight / 17) || 24;
+      attachToSession(pathSession, cols, rows);
+    }
+  } else if (sessionAttached) {
+    detachBtn.click();
+  }
+}
+window.addEventListener("popstate", () => {
+  if (popstateTimer) clearTimeout(popstateTimer);
+  popstateTimer = setTimeout(() => {
+    popstateTimer = null;
+    syncViewToUrl();
+  }, 50);
 });
 
 // ── Mobile keyboard bar ──
