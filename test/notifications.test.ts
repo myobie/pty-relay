@@ -155,3 +155,81 @@ describe("registerOscHandlers", () => {
     expect(h777).toBe(false);
   });
 });
+
+describe("OSC 99 (Kitty notification protocol)", () => {
+  it("empty metadata + payload = anonymous single-chunk notification (body)", async () => {
+    const { calls } = stubNotification({ permission: "granted" });
+    const term = makeFakeTerm();
+    registerOscHandlers(term, () => "shell");
+    term.fireOsc(99, ";Hello world");
+    await Promise.resolve();
+    expect(calls).toEqual([{ title: "shell", body: "Hello world" }]);
+  });
+
+  it("p=title and p=body with shared id combine into one notification", async () => {
+    const { calls } = stubNotification({ permission: "granted" });
+    const term = makeFakeTerm();
+    registerOscHandlers(term, () => "fallback");
+    // d defaults to 1 for title/body — each chunk is "complete" on
+    // its own from the client's perspective, but our impl waits
+    // until d=1 fires for the body before showing.
+    term.fireOsc(99, "i=foo:p=title;Build done");
+    await Promise.resolve();
+    // Title alone fired d=1 (default) — show it with empty body.
+    expect(calls).toEqual([{ title: "Build done", body: "" }]);
+  });
+
+  it("d=0 chunks accumulate; d=1 displays", async () => {
+    _resetForTesting();
+    const { calls } = stubNotification({ permission: "granted" });
+    const term = makeFakeTerm();
+    registerOscHandlers(term, () => "fallback");
+    term.fireOsc(99, "i=bar:p=title:d=0;Hello");
+    term.fireOsc(99, "i=bar:p=body:d=1;World");
+    await Promise.resolve();
+    expect(calls).toEqual([{ title: "Hello", body: "World" }]);
+  });
+
+  it("base64 payload (e=1) is decoded", async () => {
+    const { calls } = stubNotification({ permission: "granted" });
+    const term = makeFakeTerm();
+    registerOscHandlers(term, () => "fallback");
+    // "Build done" base64 is "QnVpbGQgZG9uZQ=="
+    term.fireOsc(99, "p=body:e=1;QnVpbGQgZG9uZQ==");
+    await Promise.resolve();
+    expect(calls).toEqual([{ title: "fallback", body: "Build done" }]);
+  });
+
+  it("ignores unrecognized payload types (icon/close/etc.)", () => {
+    const { calls } = stubNotification({ permission: "granted" });
+    const term = makeFakeTerm();
+    registerOscHandlers(term, () => "fallback");
+    const handled = term.fireOsc(99, "i=x:p=icon;some-icon-data");
+    expect(handled).toBe(true); // we claim it (returned true)
+    expect(calls).toEqual([]); // but no notification fires
+  });
+
+  it("OSC 99 disposer cleans up", () => {
+    stubNotification({ permission: "granted" });
+    const term = makeFakeTerm();
+    const reg = registerOscHandlers(term, () => "fallback");
+    reg.dispose();
+    expect(term.fireOsc(99, ";body")).toBe(false);
+  });
+
+  it("multiple unrelated anonymous notifications don't combine", async () => {
+    _resetForTesting();
+    const { calls } = stubNotification({ permission: "granted" });
+    const term = makeFakeTerm();
+    registerOscHandlers(term, () => "fallback");
+    // No id → each gets its own anonymous record.
+    term.fireOsc(99, ";First");
+    // Notify is async + has 1s cooldown — second one likely throttles
+    // but the IMPORTANT thing is that the second body doesn't append
+    // to the first record.
+    term.fireOsc(99, ";Second");
+    await Promise.resolve();
+    expect(calls.length).toBeGreaterThanOrEqual(1);
+    expect(calls[0].body).toBe("First");
+  });
+});

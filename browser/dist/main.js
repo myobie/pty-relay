@@ -734,6 +734,51 @@ function registerOscHandlers(term2, fallbackTitle) {
     notify(fallbackTitle() || "Notification", data);
     return true;
   });
+  const oscPending = /* @__PURE__ */ new Map();
+  const osc99 = term2.parser.registerOscHandler(99, (data) => {
+    const firstSemi = data.indexOf(";");
+    if (firstSemi === -1) {
+      notify(fallbackTitle() || "Notification", data);
+      return true;
+    }
+    const meta = data.slice(0, firstSemi);
+    const payload = data.slice(firstSemi + 1);
+    const fields = /* @__PURE__ */ new Map();
+    if (meta) {
+      for (const pair of meta.split(":")) {
+        const eq = pair.indexOf("=");
+        if (eq === -1) continue;
+        fields.set(pair.slice(0, eq), pair.slice(eq + 1));
+      }
+    }
+    const ptype = fields.get("p") ?? "body";
+    if (ptype !== "title" && ptype !== "body") {
+      return true;
+    }
+    const encoding = fields.get("e") ?? "0";
+    let decoded = payload;
+    if (encoding === "1") {
+      try {
+        decoded = atob(payload);
+      } catch {
+      }
+    }
+    const id = fields.get("i") ?? `__anon_${Math.random()}`;
+    const done = fields.get("d") !== "0";
+    let pending = oscPending.get(id);
+    if (!pending) {
+      pending = { title: "", body: "" };
+      oscPending.set(id, pending);
+    }
+    if (ptype === "title") pending.title += decoded;
+    else pending.body += decoded;
+    if (done) {
+      oscPending.delete(id);
+      const title = pending.title || fallbackTitle() || "Notification";
+      notify(title, pending.body);
+    }
+    return true;
+  });
   const osc777 = term2.parser.registerOscHandler(777, (data) => {
     const semi = data.indexOf(";");
     if (semi === -1) return false;
@@ -753,7 +798,9 @@ function registerOscHandlers(term2, fallbackTitle) {
   return {
     dispose() {
       osc9.dispose();
+      osc99.dispose();
       osc777.dispose();
+      oscPending.clear();
     }
   };
 }

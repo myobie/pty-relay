@@ -1,10 +1,15 @@
 /**
  * Terminal -> browser notification bridge.
  *
- * Listens for OSC 9 (iTerm2-style: `\e]9;<message>\a`) and OSC 777
- * (urxvt-style: `\e]777;notify;<title>;<body>\a`) emitted by remote
- * programs (build tools, CI watchers, claude code itself, etc.) and
- * routes each one to:
+ * Listens for several common notification escape-sequence dialects:
+ *
+ *   OSC 9   — iTerm2-style: `\e]9;<message>\a`
+ *   OSC 99  — Kitty's protocol, supports chunked title/body keyed by
+ *             id, base64-encoded payloads, etc. This is what Claude
+ *             Code and Kitty-aware tools emit.
+ *   OSC 777 — urxvt-style: `\e]777;notify;<title>;<body>\a`
+ *
+ * Each one routes to:
  *   1. `new Notification()` if the browser supports it AND the user
  *      has granted permission, OR
  *   2. `showToast()` as a graceful fallback (Android Chrome and iOS
@@ -93,6 +98,92 @@ export function registerOscHandlers(
     return true;
   });
 
+  // OSC 99 — Kitty's notification protocol. Format:
+  //   ESC ] 99 ; <metadata> ; <payload> ESC \    (or BEL terminator)
+  // Metadata is a colon-separated list of key=value pairs:
+  //   i=<id>   — identifier; chunks with the same id combine into
+  //              one notification
+  //   p=<type> — payload kind: "title" / "body" / "icon" / "close"
+  //              / etc. Default is "body".
+  //   d=0|1    — done flag. d=0 means more chunks coming; d=1 (or
+  //              absent for title/body) means this is the last chunk
+  //              and we should display now.
+  //   e=0|1    — encoding. 0 = utf8 plain (default), 1 = base64.
+  //
+  // Most of Kitty's protocol is opt-in fanciness (icons, buttons,
+  // urgency hints, etc.). The subset that matters for "Claude Code
+  // wants to tell me a thing" is:
+  //   - empty metadata + payload = anonymous single-chunk notification
+  //   - p=title and p=body chunks with shared id
+  // We handle those; less common payload types (icon/alive/query/
+  // close/etc) are silently ignored for now — no exceptions, no log
+  // noise. Spec: https://sw.kovidgoyal.net/kitty/desktop-notifications/
+  const oscPending = new Map<string, { title: string; body: string }>();
+  const osc99 = term.parser.registerOscHandler(99, (data: string) => {
+    const firstSemi = data.indexOf(";");
+    if (firstSemi === -1) {
+      // No metadata separator at all — treat the whole thing as a
+      // body for an anonymous, complete notification.
+      notify(fallbackTitle() || "Notification", data);
+      return true;
+    }
+    const meta = data.slice(0, firstSemi);
+    const payload = data.slice(firstSemi + 1);
+
+    const fields = new Map<string, string>();
+    if (meta) {
+      for (const pair of meta.split(":")) {
+        const eq = pair.indexOf("=");
+        if (eq === -1) continue;
+        fields.set(pair.slice(0, eq), pair.slice(eq + 1));
+      }
+    }
+
+    const ptype = fields.get("p") ?? "body";
+    // Skip payload types we don't render. icon / alive / close /
+    // query / buttons all live here. Not having them is graceful
+    // degradation — Kitty would render fancier; we render the body
+    // (when it eventually arrives) plain.
+    if (ptype !== "title" && ptype !== "body") {
+      return true;
+    }
+
+    // Decode if base64. Bad base64 is treated as plain — no point
+    // failing visibly when a notification is already best-effort.
+    const encoding = fields.get("e") ?? "0";
+    let decoded = payload;
+    if (encoding === "1") {
+      try {
+        decoded = atob(payload);
+      } catch {
+        // Use as-is.
+      }
+    }
+
+    // Default-id for chunks that don't supply one. Each gets its own
+    // anonymous record so they don't accidentally combine across
+    // unrelated notifications.
+    const id = fields.get("i") ?? `__anon_${Math.random()}`;
+    // Per spec: d defaults to 1 (single chunk done) for title/body.
+    // Only d=0 explicitly means "more coming."
+    const done = fields.get("d") !== "0";
+
+    let pending = oscPending.get(id);
+    if (!pending) {
+      pending = { title: "", body: "" };
+      oscPending.set(id, pending);
+    }
+    if (ptype === "title") pending.title += decoded;
+    else pending.body += decoded;
+
+    if (done) {
+      oscPending.delete(id);
+      const title = pending.title || fallbackTitle() || "Notification";
+      notify(title, pending.body);
+    }
+    return true;
+  });
+
   // OSC 777 — urxvt-style. Format: `notify;<title>;<body>`.
   // Anything else under 777 isn't ours; return false to let other
   // handlers (or the default) take it.
@@ -117,7 +208,9 @@ export function registerOscHandlers(
   return {
     dispose() {
       osc9.dispose();
+      osc99.dispose();
       osc777.dispose();
+      oscPending.clear();
     },
   };
 }
