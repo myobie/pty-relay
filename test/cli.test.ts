@@ -68,6 +68,14 @@ describe("CLI", () => {
     expect(stdout).toContain("--skip-allow-new-sessions-confirmation");
   });
 
+  it("usage includes --mosh flag (predictive local echo)", () => {
+    const { stdout } = runCli(["--help"]);
+    expect(stdout).toContain("--mosh");
+    // Should mention what it does so an operator scanning --help
+    // understands it without reading the source.
+    expect(stdout.toLowerCase()).toMatch(/predict|local echo|mosh-style/);
+  });
+
   it("`<command> --help` prints help instead of running the command", () => {
     // Regression for the case where `pty-relay local --help` would try to
     // run the self-hosted daemon. Our namespace dispatch should print the
