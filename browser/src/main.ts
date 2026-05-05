@@ -435,11 +435,14 @@ let lastWsFrameAtMs = 0;
  *  served from a static host (e.g. the static fallback). */
 const runtimeConfig = (() => {
   const meta = document.querySelector('meta[name="pty-relay-config"]');
-  const fallback = { latencyStats: false };
+  const fallback = { latencyStats: false, mosh: false };
   if (!meta) return fallback;
   try {
     const parsed = JSON.parse(meta.getAttribute("content") || "{}");
-    return { latencyStats: !!parsed.latencyStats };
+    return {
+      latencyStats: !!parsed.latencyStats,
+      mosh: !!parsed.mosh,
+    };
   } catch {
     return fallback;
   }
@@ -625,6 +628,7 @@ let latencyTickHandle: ReturnType<typeof setInterval> | null = null;
 let latencyReportHandle: ReturnType<typeof setInterval> | null = null;
 let healthTickHandle: ReturnType<typeof setInterval> | null = null;
 let tentativeController: TentativeController | null = null;
+let inputPredictor: InputPredictor | null = null;
 const LATENCY_TICK_MS = 1000;
 const HEALTH_TICK_MS = 1000;
 
@@ -634,6 +638,9 @@ const HEALTH_TICK_MS = 1000;
  *  and reload. */
 function bindTentativeTyping(t: Terminal): void {
   if (!tentativeEnabled()) return;
+  // Predict and tentative are two takes on the same idea — local
+  // echo. Don't let them run together.
+  if (runtimeConfig.mosh) return;
   if (tentativeController) tentativeController.destroy();
   tentativeController = startTentativeTyping(t);
 }
@@ -642,6 +649,29 @@ function teardownTentativeTyping(): void {
   if (tentativeController) {
     tentativeController.destroy();
     tentativeController = null;
+  }
+}
+
+/** Mosh-style predictive local echo: write printable user keystrokes
+ *  to xterm immediately, reconcile against server output as it
+ *  arrives. Gated on the daemon's `--mosh` flag — off unless the
+ *  operator explicitly opted in at daemon-start. */
+function bindInputPredictor(t: Terminal): void {
+  if (!runtimeConfig.mosh) return;
+  if (inputPredictor) inputPredictor.destroy();
+  inputPredictor = createInputPredictor({
+    term: t,
+    sendToServer: (data) => {
+      if (sessionAttached) sendPtyPacket(makeData(data));
+    },
+    enabled: true,
+  });
+}
+
+function teardownInputPredictor(): void {
+  if (inputPredictor) {
+    inputPredictor.destroy();
+    inputPredictor = null;
   }
 }
 
@@ -782,6 +812,7 @@ function disconnect(): void {
   document.title = DEFAULT_DOC_TITLE;
   teardownLatencyTracker();
   teardownTentativeTyping();
+  teardownInputPredictor();
   teardownNotifications();
   stopHealthTick();
   if (term) {
@@ -834,11 +865,16 @@ function attachToSession(sessionName: string, _cols: number, _rows: number): voi
       if (sessionAttached) sendPtyPacket(makeResize(rows2, cols2));
     });
     term.onData((data) => {
-      if (sessionAttached) sendPtyPacket(makeData(data));
+      if (inputPredictor) {
+        inputPredictor.onUserData(data);
+      } else if (sessionAttached) {
+        sendPtyPacket(makeData(data));
+      }
     });
     bindTerminalTitle(term, sessionName);
     bindLatencyTracker(term);
     bindTentativeTyping(term);
+    bindInputPredictor(term);
     bindNotifications(term);
   }
   sendJson({
@@ -890,12 +926,17 @@ function handleDecryptedMessage(plaintext: Uint8Array): void {
             if (sessionAttached) sendPtyPacket(makeResize(rows, cols));
           });
           term.onData((data) => {
-            if (sessionAttached) sendPtyPacket(makeData(data));
+            if (inputPredictor) {
+              inputPredictor.onUserData(data);
+            } else if (sessionAttached) {
+              sendPtyPacket(makeData(data));
+            }
           });
           bindTerminalTitle(term, msg.session);
           bindLatencyTracker(term);
           bindTentativeTyping(term);
-    bindNotifications(term);
+          bindInputPredictor(term);
+          bindNotifications(term);
         }
         return;
       } else if (msg.type === "sessions") {
@@ -911,12 +952,19 @@ function handleDecryptedMessage(plaintext: Uint8Array): void {
   for (const pkt of packets) {
     switch (pkt.type) {
       case MSG_DATA:
-        if (term) term.write(pkt.payload);
+        if (term) {
+          if (inputPredictor) inputPredictor.onServerData(pkt.payload);
+          else term.write(pkt.payload);
+        }
         break;
       case MSG_SCREEN:
         if (term) {
+          // Full-screen redraw — any predictions are stale; let the
+          // server's screen win and start fresh.
+          if (inputPredictor) inputPredictor.setEnabled(false);
           term.write("\x1B[2J\x1B[H");
           term.write(pkt.payload);
+          if (inputPredictor) inputPredictor.setEnabled(true);
         }
         break;
       case MSG_EXIT: {
@@ -956,6 +1004,10 @@ import {
   tentativeEnabled,
   type TentativeController,
 } from "./tentative-typing.ts";
+import {
+  createInputPredictor,
+  type InputPredictor,
+} from "./predict-input.ts";
 import { registerOscHandlers as registerNotificationOscHandlers } from "./notifications.ts";
 
 function spawnSession(name: string, cwd?: string): void {
@@ -1020,6 +1072,7 @@ detachBtn.addEventListener("click", () => {
   packetParser = new PacketParser();
   teardownLatencyTracker();
   teardownTentativeTyping();
+  teardownInputPredictor();
   teardownNotifications();
   if (term) {
     term.dispose();

@@ -73,6 +73,12 @@ export async function start(
      *  browser, toolbar widgets are hidden, and the daemon drops
      *  any latency_report messages without writing anything. */
     latencyStats?: boolean;
+    /** When true: web UI enables mosh-style predictive local echo —
+     *  printable keystrokes are written into xterm immediately and
+     *  reconciled against server output. Off in alt-screen mode.
+     *  When false (default): the predictor is not instantiated and
+     *  user input flows through to the daemon unchanged. */
+    mosh?: boolean;
   }
 ): Promise<void> {
   log("cli", "local start begin", {
@@ -83,6 +89,7 @@ export async function start(
     allowNewSessions: !!options?.allowNewSessions,
     bind: options?.bind,
     latencyStats: !!options?.latencyStats,
+    mosh: !!options?.mosh,
   });
   const relay = `localhost:${port}`;
   const { config, secretHash, store } = await loadDaemonConfig(
@@ -97,6 +104,7 @@ export async function start(
   const htmlPath = path.resolve(import.meta.dirname, "../../browser/dist/index.html");
   const server = createRelayServer(port, htmlPath, options?.bind, {
     latencyStats: !!options?.latencyStats,
+    mosh: !!options?.mosh,
   });
   await server.start();
 

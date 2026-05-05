@@ -22,6 +22,9 @@ export interface RelayServerOptions {
    *  the latency tracker. When false (default), the web UI sees
    *  `latencyStats:false` and skips all telemetry. */
   latencyStats?: boolean;
+  /** When true, the injected runtime config sets `mosh:true` so the
+   *  web UI starts the predictive-echo predictor. Off by default. */
+  mosh?: boolean;
 }
 
 export function createRelayServer(
@@ -42,6 +45,7 @@ export function createRelayServer(
     html = fs.readFileSync(htmlPath, "utf-8");
     const config = JSON.stringify({
       latencyStats: !!serverOpts.latencyStats,
+      mosh: !!serverOpts.mosh,
     });
     const metaTag = `<meta name="pty-relay-config" content='${config}'>`;
     // Inject right before </head> so the meta is parsed before main.js

@@ -649,6 +649,90 @@ function tentativeEnabled() {
   }
 }
 
+// browser/src/predict-input.ts
+var MAX_QUEUE = 32;
+function createInputPredictor(opts) {
+  const { term: term2, sendToServer } = opts;
+  let enabled = !!opts.enabled;
+  const queue = [];
+  function isAltScreen() {
+    try {
+      return term2.buffer.active.type !== "normal";
+    } catch {
+      return true;
+    }
+  }
+  function rollback() {
+    if (queue.length === 0) return;
+    const first = queue[0];
+    term2.write(`\x1B[${first.row + 1};${first.col + 1}H\x1B[K`);
+    queue.length = 0;
+  }
+  function onUserData(data) {
+    if (!enabled || isAltScreen()) {
+      sendToServer(data);
+      return;
+    }
+    if (queue.length >= MAX_QUEUE) {
+      sendToServer(data);
+      return;
+    }
+    if (!/^[\x20-\x7e]+$/.test(data)) {
+      sendToServer(data);
+      return;
+    }
+    for (const c of data) {
+      if (queue.length >= MAX_QUEUE) break;
+      const col = term2.buffer.active.cursorX;
+      const row = term2.buffer.active.cursorY;
+      queue.push({ row, col, char: c });
+      term2.write(c);
+    }
+    sendToServer(data);
+  }
+  function byteAt(data, i) {
+    return typeof data === "string" ? data.charCodeAt(i) : data[i];
+  }
+  function sliceFrom(data, i) {
+    return typeof data === "string" ? data.slice(i) : data.subarray(i);
+  }
+  function onServerData(data) {
+    if (!enabled || queue.length === 0) {
+      term2.write(data);
+      return;
+    }
+    const len = data.length;
+    let i = 0;
+    while (i < len && queue.length > 0) {
+      const head = queue[0];
+      if (byteAt(data, i) === head.char.charCodeAt(0)) {
+        queue.shift();
+        i++;
+      } else {
+        rollback();
+        term2.write(sliceFrom(data, i));
+        return;
+      }
+    }
+    if (i < len) {
+      term2.write(sliceFrom(data, i));
+    }
+  }
+  return {
+    onUserData,
+    onServerData,
+    setEnabled(e) {
+      if (!e && enabled) rollback();
+      enabled = e;
+    },
+    pendingCount: () => queue.length,
+    destroy() {
+      rollback();
+      enabled = false;
+    }
+  };
+}
+
 // browser/src/toast.ts
 var STACK_ID = "pty-toast-stack";
 var TOAST_DURATION_MS = 6e3;
@@ -1120,11 +1204,14 @@ var healthIndicatorEl = document.getElementById("health-indicator");
 var lastWsFrameAtMs = 0;
 var runtimeConfig = (() => {
   const meta = document.querySelector('meta[name="pty-relay-config"]');
-  const fallback = { latencyStats: false };
+  const fallback = { latencyStats: false, mosh: false };
   if (!meta) return fallback;
   try {
     const parsed = JSON.parse(meta.getAttribute("content") || "{}");
-    return { latencyStats: !!parsed.latencyStats };
+    return {
+      latencyStats: !!parsed.latencyStats,
+      mosh: !!parsed.mosh
+    };
   } catch {
     return fallback;
   }
@@ -1222,10 +1309,12 @@ var latencyTickHandle = null;
 var latencyReportHandle = null;
 var healthTickHandle = null;
 var tentativeController = null;
+var inputPredictor = null;
 var LATENCY_TICK_MS = 1e3;
 var HEALTH_TICK_MS = 1e3;
 function bindTentativeTyping(t) {
   if (!tentativeEnabled()) return;
+  if (runtimeConfig.mosh) return;
   if (tentativeController) tentativeController.destroy();
   tentativeController = startTentativeTyping(t);
 }
@@ -1233,6 +1322,23 @@ function teardownTentativeTyping() {
   if (tentativeController) {
     tentativeController.destroy();
     tentativeController = null;
+  }
+}
+function bindInputPredictor(t) {
+  if (!runtimeConfig.mosh) return;
+  if (inputPredictor) inputPredictor.destroy();
+  inputPredictor = createInputPredictor({
+    term: t,
+    sendToServer: (data) => {
+      if (sessionAttached) sendPtyPacket(makeData(data));
+    },
+    enabled: true
+  });
+}
+function teardownInputPredictor() {
+  if (inputPredictor) {
+    inputPredictor.destroy();
+    inputPredictor = null;
   }
 }
 var notificationDisposer = null;
@@ -1344,6 +1450,7 @@ function disconnect() {
   document.title = DEFAULT_DOC_TITLE;
   teardownLatencyTracker();
   teardownTentativeTyping();
+  teardownInputPredictor();
   teardownNotifications();
   stopHealthTick();
   if (term) {
@@ -1387,11 +1494,16 @@ function attachToSession(sessionName, _cols, _rows) {
       if (sessionAttached) sendPtyPacket(makeResize(rows2, cols2));
     });
     term.onData((data) => {
-      if (sessionAttached) sendPtyPacket(makeData(data));
+      if (inputPredictor) {
+        inputPredictor.onUserData(data);
+      } else if (sessionAttached) {
+        sendPtyPacket(makeData(data));
+      }
     });
     bindTerminalTitle(term, sessionName);
     bindLatencyTracker(term);
     bindTentativeTyping(term);
+    bindInputPredictor(term);
     bindNotifications(term);
   }
   sendJson({
@@ -1436,11 +1548,16 @@ function handleDecryptedMessage(plaintext) {
             if (sessionAttached) sendPtyPacket(makeResize(rows, cols));
           });
           term.onData((data) => {
-            if (sessionAttached) sendPtyPacket(makeData(data));
+            if (inputPredictor) {
+              inputPredictor.onUserData(data);
+            } else if (sessionAttached) {
+              sendPtyPacket(makeData(data));
+            }
           });
           bindTerminalTitle(term, msg.session);
           bindLatencyTracker(term);
           bindTentativeTyping(term);
+          bindInputPredictor(term);
           bindNotifications(term);
         }
         return;
@@ -1458,12 +1575,17 @@ function handleDecryptedMessage(plaintext) {
   for (const pkt of packets) {
     switch (pkt.type) {
       case MSG_DATA:
-        if (term) term.write(pkt.payload);
+        if (term) {
+          if (inputPredictor) inputPredictor.onServerData(pkt.payload);
+          else term.write(pkt.payload);
+        }
         break;
       case MSG_SCREEN:
         if (term) {
+          if (inputPredictor) inputPredictor.setEnabled(false);
           term.write("\x1B[2J\x1B[H");
           term.write(pkt.payload);
+          if (inputPredictor) inputPredictor.setEnabled(true);
         }
         break;
       case MSG_EXIT: {
@@ -1528,6 +1650,7 @@ detachBtn.addEventListener("click", () => {
   packetParser = new PacketParser();
   teardownLatencyTracker();
   teardownTentativeTyping();
+  teardownInputPredictor();
   teardownNotifications();
   if (term) {
     term.dispose();

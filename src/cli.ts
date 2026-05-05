@@ -88,6 +88,12 @@ Options:
                              latency.jsonl (rotates at 10 MB to .old).
                              OFF by default — opt in only when actively
                              debugging perceived input lag.
+  --mosh                    Enable mosh-style predictive local echo in
+                             the web UI. Predicts printable keystrokes
+                             into xterm immediately and reconciles
+                             against server output as it arrives;
+                             auto-disabled in alternate-screen mode
+                             (vim, htop). OFF by default.
   --bind <addr>             Address the HTTP/WS server binds to. Defaults to
                              127.0.0.1 when --tailscale is set (tailscale serve
                              proxies tailnet -> 127.0.0.1:port), otherwise binds
@@ -967,6 +973,7 @@ async function dispatchLocal(): Promise<void> {
     const tailscale = hasFlag("--tailscale");
     const autoApprove = hasFlag("--auto-approve");
     const latencyStats = hasFlag("--latency-stats");
+    const mosh = hasFlag("--mosh");
     // Default bind: loopback when --tailscale is set (tailscale serve
     // proxies tailnet -> 127.0.0.1:port). Otherwise leave undefined to
     // preserve the historical all-interfaces behavior for non-tailscale
@@ -984,6 +991,7 @@ async function dispatchLocal(): Promise<void> {
       passphraseFile,
       bind,
       latencyStats,
+      mosh,
     });
     return;
   }
