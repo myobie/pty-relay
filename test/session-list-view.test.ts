@@ -16,6 +16,7 @@ import {
   shortenCwd,
   formatTags,
   fuzzyMatch,
+  formatAge,
   type SessionListView,
   type SessionMeta,
 } from "../browser/src/session-list-view.ts";
@@ -113,7 +114,7 @@ describe("structure", () => {
     makeView(c);
     expect(c.querySelector(".session-list-toolbar")).toBeTruthy();
     expect(c.querySelector(".filter-input")).toBeTruthy();
-    expect(c.querySelectorAll(".sort-btn")).toHaveLength(3);
+    expect(c.querySelectorAll(".sort-btn")).toHaveLength(4);
     expect(c.querySelector(".session-list-header")).toBeTruthy();
     expect(c.querySelector(".session-rows")).toBeTruthy();
     expect(c.querySelector(".new-session-cta")?.textContent).toBe("+ new session");
@@ -278,6 +279,45 @@ describe("sort", () => {
     expect(nameBtn.classList.contains("active")).toBe(true);
     expect(nameBtn.textContent).toMatch(/name[↑↓]/);
   });
+
+  it("sort by age orders by createdAt — asc = oldest first", () => {
+    const c = mountContainer();
+    const v = makeView(c);
+    v.update([
+      { name: "newest", createdAt: "2026-05-01T12:00:00Z" },
+      { name: "oldest", createdAt: "2024-01-01T00:00:00Z" },
+      { name: "middle", createdAt: "2025-08-15T06:30:00Z" },
+    ]);
+    const ageBtn = c.querySelector('.sort-btn[data-key="age"]') as HTMLButtonElement;
+    ageBtn.click();
+    // asc: oldest first
+    expect(getRowNames(c).map((s) => s.replace(/\s.*$/, ""))).toEqual([
+      "oldest",
+      "middle",
+      "newest",
+    ]);
+    ageBtn.click(); // toggle to desc
+    expect(getRowNames(c).map((s) => s.replace(/\s.*$/, ""))).toEqual([
+      "newest",
+      "middle",
+      "oldest",
+    ]);
+  });
+
+  it("sessions without createdAt sort consistently (sink to one end)", () => {
+    const c = mountContainer();
+    const v = makeView(c);
+    v.update([
+      { name: "withTs", createdAt: "2026-05-01T12:00:00Z" },
+      { name: "noTs1" },
+      { name: "noTs2" },
+    ]);
+    const ageBtn = c.querySelector('.sort-btn[data-key="age"]') as HTMLButtonElement;
+    ageBtn.click();
+    // No-timestamps treated as "infinitely old" (ts=0); they go first in asc.
+    const names = getRowNames(c).map((s) => s.replace(/\s.*$/, ""));
+    expect(names[2]).toBe("withTs"); // The one with a real ts is last (newest in asc).
+  });
 });
 
 describe("interactions", () => {
@@ -322,5 +362,67 @@ describe("interactions", () => {
     // The input was mounted ONCE in the skeleton — its focus should
     // survive the rows-only re-render.
     expect(document.activeElement).toBe(input);
+  });
+});
+
+describe("formatAge", () => {
+  it("returns empty string for null / undefined / unparseable", () => {
+    expect(formatAge(null)).toBe("");
+    expect(formatAge(undefined)).toBe("");
+    expect(formatAge("not a date")).toBe("");
+  });
+
+  it("seconds for ages under a minute", () => {
+    const now = Date.parse("2026-05-05T12:00:00Z");
+    expect(formatAge("2026-05-05T11:59:30Z", now)).toBe("30s");
+  });
+
+  it("minutes for ages under an hour", () => {
+    const now = Date.parse("2026-05-05T12:00:00Z");
+    expect(formatAge("2026-05-05T11:35:00Z", now)).toBe("25m");
+  });
+
+  it("hours for ages under a day", () => {
+    const now = Date.parse("2026-05-05T12:00:00Z");
+    expect(formatAge("2026-05-05T05:00:00Z", now)).toBe("7h");
+  });
+
+  it("days for ages under a week", () => {
+    const now = Date.parse("2026-05-08T12:00:00Z");
+    expect(formatAge("2026-05-05T12:00:00Z", now)).toBe("3d");
+  });
+
+  it("weeks for ages under a month", () => {
+    const now = Date.parse("2026-05-22T12:00:00Z");
+    expect(formatAge("2026-05-05T12:00:00Z", now)).toBe("2w");
+  });
+
+  it("months for ages under a year", () => {
+    const now = Date.parse("2026-08-05T12:00:00Z");
+    expect(formatAge("2026-05-05T12:00:00Z", now)).toBe("3mo");
+  });
+
+  it("years for ages over a year", () => {
+    const now = Date.parse("2028-05-05T12:00:00Z");
+    expect(formatAge("2026-05-05T12:00:00Z", now)).toBe("2y");
+  });
+});
+
+describe("age in row", () => {
+  it("renders an age suffix next to the name when createdAt is set", () => {
+    const c = mountContainer();
+    const v = makeView(c);
+    const fiveMinAgo = new Date(Date.now() - 5 * 60_000).toISOString();
+    v.update([{ name: "fresh", createdAt: fiveMinAgo }]);
+    const ageEl = c.querySelector(".col-name .col-age");
+    expect(ageEl).toBeTruthy();
+    expect(ageEl?.textContent?.trim()).toMatch(/^[45]m$/);
+  });
+
+  it("omits the age suffix when createdAt is missing", () => {
+    const c = mountContainer();
+    const v = makeView(c);
+    v.update([{ name: "no-ts" }]);
+    expect(c.querySelector(".col-name .col-age")).toBeNull();
   });
 });

@@ -91,6 +91,25 @@ function canMatch(query, qi, target, ti) {
 }
 
 // browser/src/session-list-view.ts
+function formatAge(iso, now = Date.now()) {
+  if (!iso) return "";
+  const t = Date.parse(iso);
+  if (Number.isNaN(t)) return "";
+  const sec = Math.max(0, Math.floor((now - t) / 1e3));
+  if (sec < 60) return `${sec}s`;
+  const min = Math.floor(sec / 60);
+  if (min < 60) return `${min}m`;
+  const hr = Math.floor(min / 60);
+  if (hr < 24) return `${hr}h`;
+  const day = Math.floor(hr / 24);
+  if (day < 7) return `${day}d`;
+  const wk = Math.floor(day / 7);
+  if (wk < 4) return `${wk}w`;
+  const mo = Math.floor(day / 30);
+  if (mo < 12) return `${mo}mo`;
+  const yr = Math.floor(day / 365);
+  return `${yr}y`;
+}
 function shortenCwd(cwd) {
   const home = "/Users/";
   if (cwd.startsWith(home)) {
@@ -169,7 +188,8 @@ function createSessionListView(container, callbacks) {
   const sortButtons = {
     name: makeSortButton("name"),
     cmd: makeSortButton("cmd"),
-    cwd: makeSortButton("cwd")
+    cwd: makeSortButton("cwd"),
+    age: makeSortButton("age")
   };
   function makeSortButton(key) {
     const btn = document.createElement("button");
@@ -188,7 +208,7 @@ function createSessionListView(container, callbacks) {
     });
     return btn;
   }
-  for (const key of ["name", "cmd", "cwd"]) {
+  for (const key of ["name", "cmd", "cwd", "age"]) {
     sortWrap.appendChild(sortButtons[key]);
   }
   toolbar.appendChild(filterWrap);
@@ -240,6 +260,12 @@ function createSessionListView(container, callbacks) {
   };
   window.addEventListener("keydown", onWindowKeydown);
   function compareSessions(a, b) {
+    if (state.sortKey === "age") {
+      const at = a.createdAt ? Date.parse(a.createdAt) : 0;
+      const bt = b.createdAt ? Date.parse(b.createdAt) : 0;
+      const cmp2 = at - bt;
+      return state.sortDir === "asc" ? cmp2 : -cmp2;
+    }
     const get = (s) => {
       if (state.sortKey === "name") return (s.displayName || s.name).toLowerCase();
       if (state.sortKey === "cmd") return (s.command || "").toLowerCase();
@@ -314,6 +340,14 @@ function buildSessionRow(s, callbacks) {
   const tags = formatTags(s.tags);
   const nameCell = makeCol("col-name", name);
   nameCell.title = s.name;
+  const age = formatAge(s.createdAt);
+  if (age) {
+    const ageEl = document.createElement("span");
+    ageEl.className = "col-age";
+    ageEl.textContent = ` ${age}`;
+    if (s.createdAt) ageEl.title = `created ${s.createdAt}`;
+    nameCell.appendChild(ageEl);
+  }
   row.appendChild(nameCell);
   const cmdCell = makeCol("col-cmd", cmd);
   cmdCell.title = cmd;

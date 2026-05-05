@@ -28,6 +28,10 @@ export interface SessionMeta {
   command?: string;
   cwd?: string;
   tags?: Record<string, string>;
+  /** ISO-8601 timestamp from the daemon's metadata. Used for "age"
+   *  display + the optional sort-by-age column. Optional because
+   *  pre-#4 daemons don't include it in the sessions payload. */
+  createdAt?: string | null;
 }
 
 export interface RenderCallbacks {
@@ -45,8 +49,33 @@ export interface SessionListView {
   destroy(): void;
 }
 
-type SortKey = "name" | "cmd" | "cwd";
+type SortKey = "name" | "cmd" | "cwd" | "age";
 type SortDir = "asc" | "desc";
+
+/** Format an ISO timestamp as a short age string ("3m", "2h", "5d").
+ *  We pick the largest unit that fits — terse fits the row's tail.
+ *  Returns "" for missing / unparseable timestamps so callers can
+ *  use it as a drop-in. */
+export function formatAge(iso: string | null | undefined, now: number = Date.now()): string {
+  if (!iso) return "";
+  const t = Date.parse(iso);
+  if (Number.isNaN(t)) return "";
+  const sec = Math.max(0, Math.floor((now - t) / 1000));
+  if (sec < 60) return `${sec}s`;
+  const min = Math.floor(sec / 60);
+  if (min < 60) return `${min}m`;
+  const hr = Math.floor(min / 60);
+  if (hr < 24) return `${hr}h`;
+  const day = Math.floor(hr / 24);
+  if (day < 7) return `${day}d`;
+  const wk = Math.floor(day / 7);
+  if (wk < 4) return `${wk}w`;
+  // Beyond a month, switch to "Xmo" rather than naive 30-day weeks.
+  const mo = Math.floor(day / 30);
+  if (mo < 12) return `${mo}mo`;
+  const yr = Math.floor(day / 365);
+  return `${yr}y`;
+}
 
 /** Show ~/foo for paths under HOME, otherwise show the last 2 segments
  *  preceded by an ellipsis. Long absolute cwds are unreadable in a
@@ -165,6 +194,7 @@ export function createSessionListView(
     name: makeSortButton("name"),
     cmd: makeSortButton("cmd"),
     cwd: makeSortButton("cwd"),
+    age: makeSortButton("age"),
   };
   function makeSortButton(key: SortKey): HTMLButtonElement {
     const btn = document.createElement("button");
@@ -183,7 +213,7 @@ export function createSessionListView(
     });
     return btn;
   }
-  for (const key of ["name", "cmd", "cwd"] as SortKey[]) {
+  for (const key of ["name", "cmd", "cwd", "age"] as SortKey[]) {
     sortWrap.appendChild(sortButtons[key]);
   }
 
@@ -260,6 +290,17 @@ export function createSessionListView(
 
   // ─── Rendering ───
   function compareSessions(a: SessionMeta, b: SessionMeta): number {
+    if (state.sortKey === "age") {
+      // Age sorts numerically on the createdAt timestamp. Treat
+      // missing timestamps as "infinitely old" so they sink to the
+      // end in either direction (predictable rather than spurious
+      // zero-comparisons).
+      const at = a.createdAt ? Date.parse(a.createdAt) : 0;
+      const bt = b.createdAt ? Date.parse(b.createdAt) : 0;
+      // asc = oldest first (smallest ts), desc = newest first.
+      const cmp = at - bt;
+      return state.sortDir === "asc" ? cmp : -cmp;
+    }
     const get = (s: SessionMeta) => {
       if (state.sortKey === "name") return (s.displayName || s.name).toLowerCase();
       if (state.sortKey === "cmd") return (s.command || "").toLowerCase();
@@ -353,6 +394,17 @@ function buildSessionRow(
   // pass — DOM APIs handle untrusted strings safely.
   const nameCell = makeCol("col-name", name);
   nameCell.title = s.name;
+  // Append an "age" suffix when we have a createdAt — small + dim
+  // so it doesn't fight the session name for attention. Falls
+  // back to no suffix for older daemons that don't send the field.
+  const age = formatAge(s.createdAt);
+  if (age) {
+    const ageEl = document.createElement("span");
+    ageEl.className = "col-age";
+    ageEl.textContent = ` ${age}`;
+    if (s.createdAt) ageEl.title = `created ${s.createdAt}`;
+    nameCell.appendChild(ageEl);
+  }
   row.appendChild(nameCell);
 
   const cmdCell = makeCol("col-cmd", cmd);

@@ -103,6 +103,7 @@ export function handleSessionControlMessage(
             command: s.metadata?.displayCommand,
             cwd: s.metadata?.cwd,
             tags: s.metadata?.tags,
+            createdAt: s.metadata?.createdAt ?? null,
           })),
         spawn_enabled: !!options.allowNewSessions,
       });
