@@ -7,6 +7,7 @@ import { loadLabel } from "../../relay/config.ts";
 import { loadClients } from "../../relay/clients.ts";
 import sodium from "libsodium-wrappers-sumo";
 import { ready, computeSecretHash, createToken } from "../../crypto/index.ts";
+import { osc8Link } from "../../terminal-link.ts";
 
 /**
  * `pty-relay local status [--show-token] [--json]` — show the
@@ -142,7 +143,7 @@ export async function localStatusCommand(opts: LocalStatusOpts): Promise<void> {
     // fine for `--show-token` which is mostly for developer sanity
     // checks; the authoritative URL is whatever `local start`
     // prints on boot.
-    console.log(`  Token URL:   ${buildLocalhostTokenUrl(config.publicKey, config.secret)}`);
+    console.log(`  Token URL:   ${osc8Link(buildLocalhostTokenUrl(config.publicKey, config.secret))}`);
   } else if (!opts.showToken) {
     console.log("");
     console.log(`  (Run \`pty-relay local status --show-token\` to print the token URL.)`);

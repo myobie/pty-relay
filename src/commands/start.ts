@@ -22,6 +22,7 @@ import {
 import { sanitizeRemoteString } from "../sanitize.ts";
 import { handleSessionControlMessage } from "./start-shared.ts";
 import { log } from "../log.ts";
+import { osc8Link } from "../terminal-link.ts";
 
 const MAX_CLIENTS = 10;
 /** Cap on simultaneously-pending approvals. Without this, a scripted
@@ -120,13 +121,13 @@ export async function start(
 
   const boundHost = options?.bind ?? "0.0.0.0";
   console.log(`Self-hosted relay running on ${boundHost}:${port}`);
-  console.log(`Token URL: ${tokenUrl}`);
+  console.log(`Token URL: ${osc8Link(tokenUrl)}`);
 
   // Tailscale HTTPS support
   if (options?.tailscale) {
     const tsUrl = await setupTailscale(port, config);
     if (tsUrl) {
-      console.log(`Tailscale: ${tsUrl}`);
+      console.log(`Tailscale: ${osc8Link(tsUrl)}`);
       printQrCode(tsUrl);
     }
   }

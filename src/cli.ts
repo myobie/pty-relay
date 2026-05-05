@@ -3,6 +3,7 @@
 import { hostname } from "node:os";
 import { extractTagFlags } from "./args.ts";
 import { initVerbose, installExitDiagnostics, log, now, sinceMs } from "./log.ts";
+import { osc8Link } from "./terminal-link.ts";
 
 // Parse --verbose early — before any import that might instrument
 // itself during module load. The flag turns on verbose stderr logging
@@ -926,21 +927,27 @@ async function dispatchLocal(): Promise<void> {
         timeout: 5000,
       });
       const output = (peek.stdout || "") + (peek.stderr || "");
-      const stripped = output.replace(/\x1b\[[0-9;?]*[a-zA-Z]/g, "");
+      // Strip both CSI sequences (ESC [ ... letter) and OSC sequences
+      // (ESC ] ... ST). The daemon now wraps URLs in OSC 8 hyperlinks,
+      // so naive CSI-only stripping would leave escape codes inside
+      // the captured URL. ST here is BEL (\x07) — what we emit.
+      const stripped = output
+        .replace(/\x1b\[[0-9;?]*[a-zA-Z]/g, "")
+        .replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g, "");
       const urlMatch = stripped.match(/Token URL:\s*(\S+)/);
       const tailscaleMatch = stripped.match(/Tailscale:\s*(\S+)/);
 
       console.log();
       console.log(`Daemon running in pty session "${name}".`);
       if (urlMatch) {
-        console.log(`Token URL: ${urlMatch[1]}`);
+        console.log(`Token URL: ${osc8Link(urlMatch[1])}`);
       } else {
         console.log(
           `(Token URL not yet available; run 'pty peek ${name}' to see it.)`
         );
       }
       if (tailscaleMatch) {
-        console.log(`Tailscale: ${tailscaleMatch[1]}`);
+        console.log(`Tailscale: ${osc8Link(tailscaleMatch[1])}`);
         try {
           const qr = spawnSync(
             "qrencode",
