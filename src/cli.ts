@@ -88,12 +88,14 @@ Options:
                              latency.jsonl (rotates at 10 MB to .old).
                              OFF by default — opt in only when actively
                              debugging perceived input lag.
-  --mosh                    Enable mosh-style predictive local echo in
-                             the web UI. Predicts printable keystrokes
-                             into xterm immediately and reconciles
-                             against server output as it arrives;
-                             auto-disabled in alternate-screen mode
-                             (vim, htop). OFF by default.
+  --mosh                    (BETA) Enable mosh-style predictive local
+                             echo in the web UI. Predicts printable
+                             keystrokes into xterm immediately and
+                             reconciles against server output as it
+                             arrives; auto-disabled in alternate-screen
+                             mode (vim, htop). OFF by default. Beta —
+                             feedback welcome at github.com/myobie/
+                             pty-relay/issues/12.
   --bind <addr>             Address the HTTP/WS server binds to. Defaults to
                              127.0.0.1 when --tailscale is set (tailscale serve
                              proxies tailnet -> 127.0.0.1:port), otherwise binds

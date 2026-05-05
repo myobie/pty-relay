@@ -5,6 +5,18 @@ Pre-1.0 we reserve the right to break on minor bumps.
 
 ## [Unreleased]
 
+### Added
+
+- `pty-relay local start --mosh` (beta) — opt-in mosh-style predictive
+  local echo in the web UI. Printable keystrokes are written into the
+  terminal immediately and reconciled against server output as it
+  arrives, hiding round-trip latency for echo-style typing. Auto-
+  disabled in alternate-screen mode (vim, htop, anything full-screen)
+  to avoid corrupting programmatic cursor placement. Off by default;
+  enable with `--mosh` on daemon startup. Beta because we want real-
+  world feedback on the rollback heuristic before turning it on by
+  default. Issue #12.
+
 ### Changed
 
 - `pty-relay local start --tailscale` now binds the underlying
