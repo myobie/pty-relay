@@ -1341,6 +1341,8 @@ var latencyStatEl = document.getElementById("latency-stat");
 var healthIndicatorEl = document.getElementById("health-indicator");
 var fontSmallerBtn = document.getElementById("font-smaller-btn");
 var fontLargerBtn = document.getElementById("font-larger-btn");
+var infoBtn = document.getElementById("info-btn");
+var sessionInfoPanel = document.getElementById("session-info-panel");
 var lastWsFrameAtMs = 0;
 var runtimeConfig = (() => {
   const meta = document.querySelector('meta[name="pty-relay-config"]');
@@ -1628,6 +1630,9 @@ function disconnect() {
 function attachToSession(sessionName, _cols, _rows) {
   currentSession = sessionName;
   sessionNameLabel.textContent = sessionName;
+  if (infoBtn.getAttribute("aria-expanded") === "true") {
+    renderSessionInfoPanel(sessionName);
+  }
   setUrlSession(sessionName, "push");
   document.title = sessionName;
   showView("terminal");
@@ -1684,6 +1689,9 @@ function handleDecryptedMessage(plaintext) {
         currentSession = msg.session;
         sessionNameLabel.textContent = msg.session;
         document.title = msg.session;
+        if (infoBtn.getAttribute("aria-expanded") === "true") {
+          renderSessionInfoPanel(msg.session);
+        }
         setUrlSession(msg.session, "push");
         showView("terminal");
         if (!term) {
@@ -1759,7 +1767,10 @@ function spawnSession(name, cwd) {
   sendJson(msg);
 }
 var overviewView = null;
+var sessionMetaByName = /* @__PURE__ */ new Map();
 function renderSessionList(sessions) {
+  sessionMetaByName.clear();
+  for (const s of sessions) sessionMetaByName.set(s.name, s);
   if (!overviewView) {
     overviewView = createSessionListView(sessionsContainer, {
       onAttach: (name) => {
@@ -1776,8 +1787,75 @@ function renderSessionList(sessions) {
     });
   }
   overviewView.update(sessions);
+  if (currentSession) renderSessionInfoPanel(currentSession);
   showView("sessions");
 }
+function renderSessionInfoPanel(name) {
+  if (!name) {
+    sessionInfoPanel.replaceChildren();
+    return;
+  }
+  const meta = sessionMetaByName.get(name);
+  sessionInfoPanel.replaceChildren();
+  if (!meta) {
+    const empty = document.createElement("span");
+    empty.className = "empty";
+    empty.textContent = `(no metadata yet for ${name})`;
+    sessionInfoPanel.appendChild(empty);
+    return;
+  }
+  const rows = [];
+  rows.push({ label: "name", value: meta.name });
+  if (meta.displayName && meta.displayName !== meta.name) {
+    rows.push({ label: "alias", value: meta.displayName });
+  }
+  if (meta.command) rows.push({ label: "command", value: meta.command });
+  if (meta.cwd) {
+    rows.push({ label: "cwd", value: shortenCwd(meta.cwd), title: meta.cwd });
+  }
+  const age = formatAge(meta.createdAt);
+  if (age) {
+    rows.push({
+      label: "age",
+      value: age,
+      title: meta.createdAt ?? void 0
+    });
+  }
+  if (meta.tags && Object.keys(meta.tags).length > 0) {
+    const pairs = Object.entries(meta.tags).map(
+      ([k, v]) => v ? `#${k}=${v}` : `#${k}`
+    ).join("  ");
+    rows.push({ label: "tags", value: pairs, cls: "tags" });
+  }
+  for (const r of rows) {
+    const label = document.createElement("span");
+    label.className = "label";
+    label.textContent = r.label;
+    const value = document.createElement("span");
+    value.className = `value ${r.cls ?? ""}`.trim();
+    value.textContent = r.value;
+    if (r.title) value.title = r.title;
+    sessionInfoPanel.appendChild(label);
+    sessionInfoPanel.appendChild(value);
+  }
+}
+infoBtn.addEventListener("click", () => {
+  const expanded = infoBtn.getAttribute("aria-expanded") === "true";
+  if (expanded) {
+    sessionInfoPanel.setAttribute("hidden", "");
+    infoBtn.setAttribute("aria-expanded", "false");
+  } else {
+    renderSessionInfoPanel(currentSession);
+    sessionInfoPanel.removeAttribute("hidden");
+    infoBtn.setAttribute("aria-expanded", "true");
+  }
+  if (fitAddon) {
+    try {
+      fitAddon.fit();
+    } catch {
+    }
+  }
+});
 statsBtn.addEventListener("click", async () => {
   if (!latencyTracker) return;
   const summary = latencyTracker.summary();

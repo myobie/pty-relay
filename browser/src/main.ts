@@ -422,6 +422,8 @@ const latencyStatEl = document.getElementById("latency-stat")!;
 const healthIndicatorEl = document.getElementById("health-indicator")!;
 const fontSmallerBtn = document.getElementById("font-smaller-btn")!;
 const fontLargerBtn = document.getElementById("font-larger-btn")!;
+const infoBtn = document.getElementById("info-btn")!;
+const sessionInfoPanel = document.getElementById("session-info-panel")!;
 
 // Wall-clock timestamp of the most recent binary WS frame from the
 // daemon. The health classifier uses (now - this) to detect traffic
@@ -857,6 +859,13 @@ function disconnect(): void {
 function attachToSession(sessionName: string, _cols: number, _rows: number): void {
   currentSession = sessionName;
   sessionNameLabel.textContent = sessionName;
+  // Refresh the info panel for the new session — only paints if
+  // it's currently expanded (the renderer is cheap so we always
+  // write the content; the panel's own [hidden] state is what the
+  // user controls).
+  if (infoBtn.getAttribute("aria-expanded") === "true") {
+    renderSessionInfoPanel(sessionName);
+  }
   // Stick the session into the URL so refresh keeps you here instead
   // of dumping back to the overview. Use pushState so the browser's
   // back button can return to wherever the user came from
@@ -926,6 +935,9 @@ function handleDecryptedMessage(plaintext: Uint8Array): void {
         currentSession = msg.session;
         sessionNameLabel.textContent = msg.session;
         document.title = msg.session;
+        if (infoBtn.getAttribute("aria-expanded") === "true") {
+          renderSessionInfoPanel(msg.session);
+        }
         // Spawn = navigation into a session, push so back returns
         // to the overview (or previous session).
         setUrlSession(msg.session, "push");
@@ -1005,6 +1017,8 @@ function handleDecryptedMessage(plaintext: Uint8Array): void {
 
 import {
   createSessionListView,
+  formatAge,
+  shortenCwd,
   type SessionListView,
   type SessionMeta,
 } from "./session-list-view.ts";
@@ -1052,7 +1066,16 @@ function spawnSession(name: string, cwd?: string): void {
 // survives across updates.
 let overviewView: SessionListView | null = null;
 
+/** Cache of the most-recent sessions list keyed by name. Lets the
+ *  attach-page info panel render details for any session the user
+ *  has already seen in the overview, without round-tripping back
+ *  to the daemon. Repopulates on every "sessions" message so it
+ *  stays current. */
+const sessionMetaByName = new Map<string, SessionMeta>();
+
 function renderSessionList(sessions: SessionMeta[]): void {
+  sessionMetaByName.clear();
+  for (const s of sessions) sessionMetaByName.set(s.name, s);
   if (!overviewView) {
     overviewView = createSessionListView(sessionsContainer, {
       onAttach: (name) => {
@@ -1069,8 +1092,86 @@ function renderSessionList(sessions: SessionMeta[]): void {
     });
   }
   overviewView.update(sessions);
+  // If we're already attached when a refresh comes in, re-paint the
+  // info panel from the new metadata (the cwd/tags might have
+  // changed via `pty tag` / `pty rename`).
+  if (currentSession) renderSessionInfoPanel(currentSession);
   showView("sessions");
 }
+
+/** Build / refresh the session info panel from the cached metadata.
+ *  Called whenever the panel needs to reflect a new session (attach,
+ *  spawn, popstate) AND whenever the cache is updated by a fresh
+ *  sessions message. The panel itself stays in whatever
+ *  expanded/collapsed state the user picked. */
+function renderSessionInfoPanel(name: string | null): void {
+  if (!name) {
+    sessionInfoPanel.replaceChildren();
+    return;
+  }
+  const meta = sessionMetaByName.get(name);
+  sessionInfoPanel.replaceChildren();
+  if (!meta) {
+    // We're attached via URL reload before the first sessions list
+    // arrived. Show a quiet placeholder rather than going blank.
+    const empty = document.createElement("span");
+    empty.className = "empty";
+    empty.textContent = `(no metadata yet for ${name})`;
+    sessionInfoPanel.appendChild(empty);
+    return;
+  }
+  const rows: Array<{ label: string; value: string; cls?: string; title?: string }> = [];
+  rows.push({ label: "name", value: meta.name });
+  if (meta.displayName && meta.displayName !== meta.name) {
+    rows.push({ label: "alias", value: meta.displayName });
+  }
+  if (meta.command) rows.push({ label: "command", value: meta.command });
+  if (meta.cwd) {
+    rows.push({ label: "cwd", value: shortenCwd(meta.cwd), title: meta.cwd });
+  }
+  const age = formatAge(meta.createdAt);
+  if (age) {
+    rows.push({
+      label: "age",
+      value: age,
+      title: meta.createdAt ?? undefined,
+    });
+  }
+  if (meta.tags && Object.keys(meta.tags).length > 0) {
+    const pairs = Object.entries(meta.tags).map(([k, v]) =>
+      v ? `#${k}=${v}` : `#${k}`
+    ).join("  ");
+    rows.push({ label: "tags", value: pairs, cls: "tags" });
+  }
+  for (const r of rows) {
+    const label = document.createElement("span");
+    label.className = "label";
+    label.textContent = r.label;
+    const value = document.createElement("span");
+    value.className = `value ${r.cls ?? ""}`.trim();
+    value.textContent = r.value;
+    if (r.title) value.title = r.title;
+    sessionInfoPanel.appendChild(label);
+    sessionInfoPanel.appendChild(value);
+  }
+}
+
+infoBtn.addEventListener("click", () => {
+  const expanded = infoBtn.getAttribute("aria-expanded") === "true";
+  if (expanded) {
+    sessionInfoPanel.setAttribute("hidden", "");
+    infoBtn.setAttribute("aria-expanded", "false");
+  } else {
+    renderSessionInfoPanel(currentSession);
+    sessionInfoPanel.removeAttribute("hidden");
+    infoBtn.setAttribute("aria-expanded", "true");
+  }
+  // The terminal area shrunk/grew — re-fit so xterm picks up the
+  // new dimensions cleanly.
+  if (fitAddon) {
+    try { fitAddon.fit(); } catch {}
+  }
+});
 
 statsBtn.addEventListener("click", async () => {
   if (!latencyTracker) return;

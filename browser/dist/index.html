@@ -370,6 +370,42 @@
     /* Brief flash after a successful copy. */
     #stats-btn.copied { background: #234; color: var(--accent); }
 
+    /* Session info panel — keep visually subordinate to the terminal.
+       Same dark surface as the toolbar so it reads as a continuation,
+       not a popover. The grid lays out a definition list of label →
+       value pairs that wraps cleanly on narrow widths. */
+    #session-info-panel {
+      background: #0d0d0d;
+      border-bottom: 1px solid #222;
+      padding: 8px 14px;
+      font-size: 12px;
+      color: #aaa;
+      display: grid;
+      grid-template-columns: max-content 1fr;
+      gap: 4px 14px;
+      align-items: baseline;
+    }
+    #session-info-panel[hidden] { display: none; }
+    #session-info-panel .label {
+      color: #555;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      font-size: 10px;
+      white-space: nowrap;
+    }
+    #session-info-panel .value {
+      overflow: hidden;
+      text-overflow: ellipsis;
+      word-break: break-word;
+    }
+    #session-info-panel .value.tags { color: #6da; }
+    #session-info-panel .empty {
+      grid-column: 1 / -1;
+      color: #666;
+      font-style: italic;
+    }
+    #info-btn[aria-expanded="true"] { background: var(--btn-active); }
+
     /* Toast stack for in-page notifications (used as fallback when
        system Notification API isn't available — Android Chrome,
        iOS, denied permission). Bottom-right, stacks newest on top
@@ -578,11 +614,18 @@
       <span class="session-name" id="session-name-label"></span>
       <span id="health-indicator" class="health-indicator" data-state="unknown" title="Connection health"></span>
       <span id="latency-stat" class="latency-stat" title="Click 'Stats' to copy a full latency summary"></span>
+      <button id="info-btn" title="Show session details (tags, cwd, age)" aria-expanded="false" aria-controls="session-info-panel">Info</button>
       <button id="font-smaller-btn" title="Smaller terminal font" aria-label="Smaller terminal font">A−</button>
       <button id="font-larger-btn" title="Larger terminal font" aria-label="Larger terminal font">A+</button>
       <button id="stats-btn" title="Copy latency stats to clipboard">Stats</button>
       <button id="detach-btn">Detach</button>
     </div>
+    <!-- Session info panel: collapsed by default, expanded by the
+         Info button. Lives between toolbar and terminal so opening
+         it shrinks the terminal slightly rather than overlapping it
+         (we have a real layout, not a popover) — predictable and
+         keyboard-accessible. -->
+    <div id="session-info-panel" hidden></div>
     <div id="terminal-container"></div>
     <div id="keyboard">
       <div id="quick-bar"></div>
