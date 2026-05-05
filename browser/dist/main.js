@@ -733,6 +733,59 @@ function createInputPredictor(opts) {
   };
 }
 
+// browser/src/font-size.ts
+var STORAGE_KEY = "pty-relay:font-size";
+var DEFAULT_SIZE = 14;
+var MIN_SIZE = 10;
+var MAX_SIZE = 32;
+var STEP = 1;
+function clamp(n) {
+  if (!Number.isFinite(n)) return DEFAULT_SIZE;
+  if (n < MIN_SIZE) return MIN_SIZE;
+  if (n > MAX_SIZE) return MAX_SIZE;
+  return Math.round(n);
+}
+function loadFontSize() {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if (!raw) return DEFAULT_SIZE;
+    const n = parseInt(raw, 10);
+    return clamp(n);
+  } catch {
+    return DEFAULT_SIZE;
+  }
+}
+function saveFontSize(size) {
+  try {
+    localStorage.setItem(STORAGE_KEY, String(clamp(size)));
+  } catch {
+  }
+}
+function applyFontSize(term2, fit, size) {
+  const next = clamp(size);
+  term2.options.fontSize = next;
+  try {
+    fit.fit();
+  } catch {
+  }
+}
+function createFontSizeController(term2, fit, initial = loadFontSize()) {
+  let size = clamp(initial);
+  applyFontSize(term2, fit, size);
+  function set(next) {
+    const clamped = clamp(next);
+    if (clamped === size) return;
+    size = clamped;
+    applyFontSize(term2, fit, size);
+    saveFontSize(size);
+  }
+  return {
+    current: () => size,
+    bump: (delta) => set(size + delta * STEP),
+    reset: () => set(DEFAULT_SIZE)
+  };
+}
+
 // browser/src/toast.ts
 var STACK_ID = "pty-toast-stack";
 var TOAST_DURATION_MS = 6e3;
@@ -1201,6 +1254,8 @@ var detachBtn = document.getElementById("detach-btn");
 var statsBtn = document.getElementById("stats-btn");
 var latencyStatEl = document.getElementById("latency-stat");
 var healthIndicatorEl = document.getElementById("health-indicator");
+var fontSmallerBtn = document.getElementById("font-smaller-btn");
+var fontLargerBtn = document.getElementById("font-larger-btn");
 var lastWsFrameAtMs = 0;
 var runtimeConfig = (() => {
   const meta = document.querySelector('meta[name="pty-relay-config"]');
@@ -1274,7 +1329,11 @@ function settledFit(term2, fit) {
 }
 var TERMINAL_OPTIONS = {
   cursorBlink: true,
-  fontSize: 14,
+  // Initial size comes from localStorage. If the user adjusts via
+  // A+/A- the controller below applies and persists the change.
+  // Pinned at construction time only — changes after this go through
+  // term.options.fontSize, not through this object.
+  fontSize: loadFontSize(),
   // Match the rest of the page's monospace stack. Without an
   // explicit fontFamily xterm picks its own default (usually
   // "courier-new"), which doesn't match the SF Mono / Menlo /
@@ -1310,6 +1369,7 @@ var latencyReportHandle = null;
 var healthTickHandle = null;
 var tentativeController = null;
 var inputPredictor = null;
+var fontSizeController = null;
 var LATENCY_TICK_MS = 1e3;
 var HEALTH_TICK_MS = 1e3;
 function bindTentativeTyping(t) {
@@ -1351,6 +1411,12 @@ function teardownNotifications() {
     notificationDisposer.dispose();
     notificationDisposer = null;
   }
+}
+function bindFontSizeController(t, f) {
+  fontSizeController = createFontSizeController(t, f);
+}
+function teardownFontSizeController() {
+  fontSizeController = null;
 }
 function updateHealthIndicator() {
   const summary = latencyTracker?.summary();
@@ -1451,6 +1517,7 @@ function disconnect() {
   teardownLatencyTracker();
   teardownTentativeTyping();
   teardownInputPredictor();
+  teardownFontSizeController();
   teardownNotifications();
   stopHealthTick();
   if (term) {
@@ -1504,6 +1571,7 @@ function attachToSession(sessionName, _cols, _rows) {
     bindLatencyTracker(term);
     bindTentativeTyping(term);
     bindInputPredictor(term);
+    bindFontSizeController(term, fitAddon);
     bindNotifications(term);
   }
   sendJson({
@@ -1558,6 +1626,7 @@ function handleDecryptedMessage(plaintext) {
           bindLatencyTracker(term);
           bindTentativeTyping(term);
           bindInputPredictor(term);
+          bindFontSizeController(term, fitAddon);
           bindNotifications(term);
         }
         return;
@@ -1641,6 +1710,12 @@ statsBtn.addEventListener("click", async () => {
   statsBtn.classList.add("copied");
   setTimeout(() => statsBtn.classList.remove("copied"), 600);
 });
+fontSmallerBtn.addEventListener("click", () => {
+  if (fontSizeController) fontSizeController.bump(-1);
+});
+fontLargerBtn.addEventListener("click", () => {
+  if (fontSizeController) fontSizeController.bump(1);
+});
 detachBtn.addEventListener("click", () => {
   if (sessionAttached) sendPtyPacket(makeDetach());
   sessionAttached = false;
@@ -1651,6 +1726,7 @@ detachBtn.addEventListener("click", () => {
   teardownLatencyTracker();
   teardownTentativeTyping();
   teardownInputPredictor();
+  teardownFontSizeController();
   teardownNotifications();
   if (term) {
     term.dispose();

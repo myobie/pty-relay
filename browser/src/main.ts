@@ -420,6 +420,8 @@ const detachBtn = document.getElementById("detach-btn")!;
 const statsBtn = document.getElementById("stats-btn")!;
 const latencyStatEl = document.getElementById("latency-stat")!;
 const healthIndicatorEl = document.getElementById("health-indicator")!;
+const fontSmallerBtn = document.getElementById("font-smaller-btn")!;
+const fontLargerBtn = document.getElementById("font-larger-btn")!;
 
 // Wall-clock timestamp of the most recent binary WS frame from the
 // daemon. The health classifier uses (now - this) to detect traffic
@@ -557,7 +559,11 @@ function settledFit(term: Terminal, fit: FitAddon): void {
  *  scroll, theme aligned. */
 const TERMINAL_OPTIONS = {
   cursorBlink: true,
-  fontSize: 14,
+  // Initial size comes from localStorage. If the user adjusts via
+  // A+/A- the controller below applies and persists the change.
+  // Pinned at construction time only — changes after this go through
+  // term.options.fontSize, not through this object.
+  fontSize: loadFontSize(),
   // Match the rest of the page's monospace stack. Without an
   // explicit fontFamily xterm picks its own default (usually
   // "courier-new"), which doesn't match the SF Mono / Menlo /
@@ -629,6 +635,7 @@ let latencyReportHandle: ReturnType<typeof setInterval> | null = null;
 let healthTickHandle: ReturnType<typeof setInterval> | null = null;
 let tentativeController: TentativeController | null = null;
 let inputPredictor: InputPredictor | null = null;
+let fontSizeController: FontSizeController | null = null;
 const LATENCY_TICK_MS = 1000;
 const HEALTH_TICK_MS = 1000;
 
@@ -690,6 +697,16 @@ function teardownNotifications(): void {
     notificationDisposer.dispose();
     notificationDisposer = null;
   }
+}
+
+/** Bind the font-size controller to the active terminal + fit addon.
+ *  Idempotent: replaces any previous controller. */
+function bindFontSizeController(t: Terminal, f: FitAddon): void {
+  fontSizeController = createFontSizeController(t, f);
+}
+
+function teardownFontSizeController(): void {
+  fontSizeController = null;
 }
 
 /** Update the health-indicator dot from current state. Pure read of
@@ -813,6 +830,7 @@ function disconnect(): void {
   teardownLatencyTracker();
   teardownTentativeTyping();
   teardownInputPredictor();
+  teardownFontSizeController();
   teardownNotifications();
   stopHealthTick();
   if (term) {
@@ -875,6 +893,7 @@ function attachToSession(sessionName: string, _cols: number, _rows: number): voi
     bindLatencyTracker(term);
     bindTentativeTyping(term);
     bindInputPredictor(term);
+    bindFontSizeController(term, fitAddon);
     bindNotifications(term);
   }
   sendJson({
@@ -936,6 +955,7 @@ function handleDecryptedMessage(plaintext: Uint8Array): void {
           bindLatencyTracker(term);
           bindTentativeTyping(term);
           bindInputPredictor(term);
+          bindFontSizeController(term, fitAddon);
           bindNotifications(term);
         }
         return;
@@ -1008,6 +1028,11 @@ import {
   createInputPredictor,
   type InputPredictor,
 } from "./predict-input.ts";
+import {
+  createFontSizeController,
+  loadFontSize,
+  type FontSizeController,
+} from "./font-size.ts";
 import { registerOscHandlers as registerNotificationOscHandlers } from "./notifications.ts";
 
 function spawnSession(name: string, cwd?: string): void {
@@ -1063,6 +1088,17 @@ statsBtn.addEventListener("click", async () => {
   setTimeout(() => statsBtn.classList.remove("copied"), 600);
 });
 
+// Font size: A− and A+ adjust by 1px, clamped to a sane range, and
+// persist to localStorage. The controller is bound at attach-time
+// (so a fresh terminal gets the saved size); these handlers only
+// fire when a terminal exists.
+fontSmallerBtn.addEventListener("click", () => {
+  if (fontSizeController) fontSizeController.bump(-1);
+});
+fontLargerBtn.addEventListener("click", () => {
+  if (fontSizeController) fontSizeController.bump(+1);
+});
+
 detachBtn.addEventListener("click", () => {
   if (sessionAttached) sendPtyPacket(makeDetach());
   sessionAttached = false;
@@ -1073,6 +1109,7 @@ detachBtn.addEventListener("click", () => {
   teardownLatencyTracker();
   teardownTentativeTyping();
   teardownInputPredictor();
+  teardownFontSizeController();
   teardownNotifications();
   if (term) {
     term.dispose();
