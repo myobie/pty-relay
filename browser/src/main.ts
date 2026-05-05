@@ -439,13 +439,16 @@ let lastWsFrameAtMs = 0;
  *  served from a static host (e.g. the static fallback). */
 const runtimeConfig = (() => {
   const meta = document.querySelector('meta[name="pty-relay-config"]');
-  const fallback = { latencyStats: false, mosh: false };
+  const fallback = { latencyStats: false, mosh: false, osc8Confirm: true };
   if (!meta) return fallback;
   try {
     const parsed = JSON.parse(meta.getAttribute("content") || "{}");
     return {
       latencyStats: !!parsed.latencyStats,
       mosh: !!parsed.mosh,
+      // Default true — only an explicit `false` in the meta tag
+      // disables the prompt. A missing field stays safe.
+      osc8Confirm: parsed.osc8Confirm !== false,
     };
   } catch {
     return fallback;
@@ -559,6 +562,35 @@ function settledFit(term: Terminal, fit: FitAddon): void {
 /** Shared options for every Terminal we construct. Two creation
  *  sites (attach + spawn) used to drift; extracting keeps font,
  *  scroll, theme aligned. */
+/** Click handler for OSC 8 hyperlinks. Without this, xterm renders
+ *  hyperlinks as styled text but they're not clickable. We wire a
+ *  real handler so an OSC 8 sequence in shell output (e.g. `gh
+ *  issue list` results, `bat`'s file: links) becomes a click
+ *  target.
+ *
+ *  When `runtimeConfig.osc8Confirm` is true (default), we ask the
+ *  user before navigating because the visible text of an OSC 8
+ *  link can mismatch the underlying URL — that's a known anti-
+ *  phishing concern. Operators who trust the sessions running on
+ *  their daemon can flip the prompt off with --skip-osc8-confirm. */
+function osc8LinkHandler(_event: MouseEvent, uri: string): void {
+  // Only navigate to schemes that make sense in a browser tab. A
+  // shell program might emit `file://` or even `mailto:` — `mailto:`
+  // is fine but `file://` is unhelpful and potentially confusing
+  // when opened from a remote terminal.
+  if (!/^https?:|^mailto:/i.test(uri)) {
+    // Quietly drop. xterm will still render the underline; clicks
+    // are just no-op for these schemes.
+    return;
+  }
+  if (runtimeConfig.osc8Confirm) {
+    if (!window.confirm(`Open this link?\n\n${uri}`)) return;
+  }
+  // noopener: don't leak window.opener to the linked page; noreferrer
+  // for good measure. New tab, never replace ourselves.
+  window.open(uri, "_blank", "noopener,noreferrer");
+}
+
 const TERMINAL_OPTIONS = {
   cursorBlink: true,
   // Initial size comes from localStorage. If the user adjusts via
@@ -577,6 +609,7 @@ const TERMINAL_OPTIONS = {
   // next RAF as before, but no easing layer on top.
   smoothScrollDuration: 0,
   theme: { background: "#0a0a0a" },
+  linkHandler: { activate: osc8LinkHandler },
 } as const;
 
 /** Load the WebGL renderer addon. The DOM/canvas renderer struggles

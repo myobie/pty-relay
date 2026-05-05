@@ -1346,13 +1346,16 @@ var sessionInfoPanel = document.getElementById("session-info-panel");
 var lastWsFrameAtMs = 0;
 var runtimeConfig = (() => {
   const meta = document.querySelector('meta[name="pty-relay-config"]');
-  const fallback = { latencyStats: false, mosh: false };
+  const fallback = { latencyStats: false, mosh: false, osc8Confirm: true };
   if (!meta) return fallback;
   try {
     const parsed = JSON.parse(meta.getAttribute("content") || "{}");
     return {
       latencyStats: !!parsed.latencyStats,
-      mosh: !!parsed.mosh
+      mosh: !!parsed.mosh,
+      // Default true — only an explicit `false` in the meta tag
+      // disables the prompt. A missing field stays safe.
+      osc8Confirm: parsed.osc8Confirm !== false
     };
   } catch {
     return fallback;
@@ -1414,6 +1417,17 @@ function settledFit(term2, fit) {
     onceDisposer.dispose();
   });
 }
+function osc8LinkHandler(_event, uri) {
+  if (!/^https?:|^mailto:/i.test(uri)) {
+    return;
+  }
+  if (runtimeConfig.osc8Confirm) {
+    if (!window.confirm(`Open this link?
+
+${uri}`)) return;
+  }
+  window.open(uri, "_blank", "noopener,noreferrer");
+}
 var TERMINAL_OPTIONS = {
   cursorBlink: true,
   // Initial size comes from localStorage. If the user adjusts via
@@ -1431,7 +1445,8 @@ var TERMINAL_OPTIONS = {
   // viewport. 0 disables the animation; xterm renders at the
   // next RAF as before, but no easing layer on top.
   smoothScrollDuration: 0,
-  theme: { background: "#0a0a0a" }
+  theme: { background: "#0a0a0a" },
+  linkHandler: { activate: osc8LinkHandler }
 };
 function loadWebglRenderer(t) {
   function attach() {

@@ -25,6 +25,10 @@ export interface RelayServerOptions {
   /** When true, the injected runtime config sets `mosh:true` so the
    *  web UI starts the predictive-echo predictor. Off by default. */
   mosh?: boolean;
+  /** OSC 8 hyperlink click behavior. true (default) → confirm()
+   *  prompt before navigation; false → direct navigation. The
+   *  daemon's --skip-osc8-confirm flag negates this. */
+  osc8Confirm?: boolean;
 }
 
 export function createRelayServer(
@@ -46,6 +50,9 @@ export function createRelayServer(
     const config = JSON.stringify({
       latencyStats: !!serverOpts.latencyStats,
       mosh: !!serverOpts.mosh,
+      // Default true — explicit `=== false` opt-out so omitting the
+      // option still gives users the safer click-to-confirm path.
+      osc8Confirm: serverOpts.osc8Confirm !== false,
     });
     const metaTag = `<meta name="pty-relay-config" content='${config}'>`;
     // Inject right before </head> so the meta is parsed before main.js

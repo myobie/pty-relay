@@ -80,6 +80,13 @@ export async function start(
      *  When false (default): the predictor is not instantiated and
      *  user input flows through to the daemon unchanged. */
     mosh?: boolean;
+    /** When true (default): web UI shows a confirm() dialog before
+     *  opening an OSC 8 hyperlink in a new tab. When false:
+     *  navigation is direct, no prompt. The CLI flag is the
+     *  negation (`--skip-osc8-confirm`); we keep the affirmative
+     *  here so the data flowing to the meta tag matches the
+     *  conditional in main.ts ("if osc8Confirm, prompt"). */
+    osc8Confirm?: boolean;
   }
 ): Promise<void> {
   log("cli", "local start begin", {
@@ -91,6 +98,7 @@ export async function start(
     bind: options?.bind,
     latencyStats: !!options?.latencyStats,
     mosh: !!options?.mosh,
+    osc8Confirm: options?.osc8Confirm !== false,
   });
   const relay = `localhost:${port}`;
   const { config, secretHash, store } = await loadDaemonConfig(
@@ -106,6 +114,8 @@ export async function start(
   const server = createRelayServer(port, htmlPath, options?.bind, {
     latencyStats: !!options?.latencyStats,
     mosh: !!options?.mosh,
+    // Default true — confirm prompt on. Falsy options → on.
+    osc8Confirm: options?.osc8Confirm !== false,
   });
   await server.start();
 

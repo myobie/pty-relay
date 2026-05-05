@@ -97,6 +97,15 @@ Options:
                              mode (vim, htop). OFF by default. Beta —
                              feedback welcome at github.com/myobie/
                              pty-relay/issues/12.
+  --skip-osc8-confirm       Skip the click-confirmation prompt for
+                             OSC 8 hyperlinks in the web terminal —
+                             clicks open the URL directly in a new
+                             tab. Default behavior shows a confirm()
+                             dialog so users can review the URL
+                             before navigating (the visible label of
+                             an OSC 8 link can mismatch the target).
+                             Useful for trusted sessions where the
+                             extra click adds friction.
   --bind <addr>             Address the HTTP/WS server binds to. Defaults to
                              127.0.0.1 when --tailscale is set (tailscale serve
                              proxies tailnet -> 127.0.0.1:port), otherwise binds
@@ -983,6 +992,7 @@ async function dispatchLocal(): Promise<void> {
     const autoApprove = hasFlag("--auto-approve");
     const latencyStats = hasFlag("--latency-stats");
     const mosh = hasFlag("--mosh");
+    const skipOsc8Confirm = hasFlag("--skip-osc8-confirm");
     // Default bind: loopback when --tailscale is set (tailscale serve
     // proxies tailnet -> 127.0.0.1:port). Otherwise leave undefined to
     // preserve the historical all-interfaces behavior for non-tailscale
@@ -1001,6 +1011,9 @@ async function dispatchLocal(): Promise<void> {
       bind,
       latencyStats,
       mosh,
+      // The boolean we plumb downstream is the affirmative — "should
+      // we show the confirm prompt." Flag opts that out.
+      osc8Confirm: !skipOsc8Confirm,
     });
     return;
   }

@@ -76,6 +76,12 @@ describe("CLI", () => {
     expect(stdout.toLowerCase()).toMatch(/predict|local echo|mosh-style/);
   });
 
+  it("usage includes --skip-osc8-confirm flag", () => {
+    const { stdout } = runCli(["--help"]);
+    expect(stdout).toContain("--skip-osc8-confirm");
+    expect(stdout.toLowerCase()).toMatch(/osc 8|hyperlink|confirm/);
+  });
+
   it("`<command> --help` prints help instead of running the command", () => {
     // Regression for the case where `pty-relay local --help` would try to
     // run the self-hosted daemon. Our namespace dispatch should print the

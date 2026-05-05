@@ -16,7 +16,11 @@ import { createRelayServer } from "../src/serve/server.ts";
 
 const HTML_PATH = path.resolve(import.meta.dirname, "../browser/dist/index.html");
 
-async function bootOnRandomPort(opts: { mosh?: boolean; latencyStats?: boolean }): Promise<{
+async function bootOnRandomPort(opts: {
+  mosh?: boolean;
+  latencyStats?: boolean;
+  osc8Confirm?: boolean;
+}): Promise<{
   port: number;
   stop: () => Promise<void>;
 }> {
@@ -25,6 +29,7 @@ async function bootOnRandomPort(opts: { mosh?: boolean; latencyStats?: boolean }
     const server = createRelayServer(port, HTML_PATH, "127.0.0.1", {
       mosh: opts.mosh,
       latencyStats: opts.latencyStats,
+      osc8Confirm: opts.osc8Confirm,
     });
     try {
       await server.start();
@@ -84,6 +89,28 @@ describe("served runtime config meta", () => {
       const config = parseConfigMeta(html);
       expect(config.mosh).toBe(true);
       expect(config.latencyStats).toBe(true);
+    } finally {
+      await stop();
+    }
+  });
+
+  it("default runtime config has osc8Confirm:true (safe default)", async () => {
+    const { port, stop } = await bootOnRandomPort({});
+    try {
+      const html = await fetchIndex(port);
+      const config = parseConfigMeta(html);
+      expect(config.osc8Confirm).toBe(true);
+    } finally {
+      await stop();
+    }
+  });
+
+  it("osc8Confirm:false is reflected in the meta when explicitly opted out", async () => {
+    const { port, stop } = await bootOnRandomPort({ osc8Confirm: false });
+    try {
+      const html = await fetchIndex(port);
+      const config = parseConfigMeta(html);
+      expect(config.osc8Confirm).toBe(false);
     } finally {
       await stop();
     }

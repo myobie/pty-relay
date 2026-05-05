@@ -16,6 +16,38 @@ Pre-1.0 we reserve the right to break on minor bumps.
   enable with `--mosh` on daemon startup. Beta because we want real-
   world feedback on the rollback heuristic before turning it on by
   default. Issue #12.
+- Web UI now wraps the printed `Token URL` and `Tailscale` lines in
+  OSC 8 hyperlinks so terminals that support the protocol render
+  them as clickable links. Plain URLs are still emitted when stdout
+  is piped or `NO_COLOR` is set. Issue #13.
+- Web UI session-overview list shows session age (`3m`, `2h`, `5d`)
+  and supports a new `age` sort. Issue #4.
+- Web UI attach page has a collapsible "Info" panel showing the
+  attached session's tags, command, cwd, age, and aliases. Hidden
+  by default; opening shrinks the terminal slightly rather than
+  overlapping it. Issue #5.
+- Terminal font-size control in the web UI (`A−` / `A+` toolbar
+  buttons), bounded to [10, 32] px and persisted via localStorage.
+  Issue #8.
+- Mobile keyboard input-mode toggle (`abc` / `ABC`) lets you
+  disable autocorrect / autocapitalize / autocomplete / spellcheck
+  for shell-style input where OS assists do more harm than good.
+  Persisted per-device. Issue #10.
+- `pty-relay local start --skip-osc8-confirm` skips the click-to-
+  confirm prompt for OSC 8 hyperlinks in the web terminal. Default
+  behavior shows a confirm() so users can review the URL before
+  navigating (visible label can mismatch the underlying target).
+  Issue #2.
+
+### Fixed
+
+- Web UI: mobile session-list layout no longer renders horizontally
+  shifted off-screen. The container had `overflow-y: auto` which
+  per CSS spec promoted `overflow-x` from `visible` to `auto`,
+  letting iOS Safari land first paint scrolled left of zero when
+  any row's cwd or tag value was wider than the viewport. Both
+  axes are now explicitly clipped, and rows can shrink to 0
+  everywhere they could previously force overflow. Issue #6.
 
 ### Changed
 
