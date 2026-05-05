@@ -513,6 +513,23 @@
       font-size: 14px;
       cursor: pointer;
     }
+    /* Keyboard-assist toggle: not a primary action — render as a
+       muted ghost button. When raw mode is active (aria-pressed=true)
+       lift the styling so the user can see at a glance the OS is
+       being asked to stay out of the way. */
+    #text-input-bar .kb-mode-btn {
+      background: transparent;
+      color: #888;
+      border: 1px solid #333;
+      padding: 6px 10px;
+      font-size: 12px;
+      min-width: 48px;
+    }
+    #text-input-bar .kb-mode-btn[aria-pressed="true"] {
+      background: var(--btn-locked);
+      color: #fff;
+      border-color: var(--btn-locked);
+    }
 
     /* --- Loading / Error --- */
     #status-overlay {
@@ -565,6 +582,7 @@
       <div id="quick-bar"></div>
       <div id="key-panel"></div>
       <div id="text-input-bar">
+        <button id="kb-mode-btn" class="kb-mode-btn" title="Toggle keyboard assist (autocorrect / autocapitalize)" aria-pressed="false" aria-label="Keyboard assist">abc</button>
         <textarea id="text-input" rows="1" autocorrect="on" autocapitalize="sentences" placeholder="Type..."></textarea>
         <button id="text-send-btn">Send</button>
         <button id="text-back-btn" class="kb-btn">←</button>

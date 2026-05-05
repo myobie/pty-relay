@@ -1033,6 +1033,10 @@ import {
   loadFontSize,
   type FontSizeController,
 } from "./font-size.ts";
+import {
+  createKeyboardModeController,
+  type KeyboardMode,
+} from "./keyboard-mode.ts";
 import { registerOscHandlers as registerNotificationOscHandlers } from "./notifications.ts";
 
 function spawnSession(name: string, cwd?: string): void {
@@ -1172,8 +1176,29 @@ const textInputBar = document.getElementById("text-input-bar")!;
 const textInput = document.getElementById("text-input") as HTMLTextAreaElement;
 const textSendBtn = document.getElementById("text-send-btn")!;
 const textBackBtn = document.getElementById("text-back-btn")!;
+const kbModeBtn = document.getElementById("kb-mode-btn") as HTMLButtonElement;
 const kbReopen = document.getElementById("kb-reopen")!;
 const keyboard = document.getElementById("keyboard")!;
+
+// Keyboard-mode toggle: bound once at module init since the textarea
+// outlives the Terminal instance (lives directly in #keyboard).
+// Shows label "abc" when assisted (default), "ABC" when raw —
+// matches the visual cue most mobile keyboards already use for
+// caps-lock / no-autocorrect modes.
+const keyboardModeController = createKeyboardModeController(textInput, (mode: KeyboardMode) => {
+  if (mode === "raw") {
+    kbModeBtn.textContent = "ABC";
+    kbModeBtn.setAttribute("aria-pressed", "true");
+    kbModeBtn.title = "Keyboard assist OFF — autocorrect / autocapitalize disabled. Click to re-enable.";
+  } else {
+    kbModeBtn.textContent = "abc";
+    kbModeBtn.setAttribute("aria-pressed", "false");
+    kbModeBtn.title = "Keyboard assist ON — autocorrect / autocapitalize enabled. Click to disable.";
+  }
+});
+kbModeBtn.addEventListener("click", () => {
+  keyboardModeController.toggle();
+});
 
 let stickyCtrl = false;
 let lockedCtrl = false;

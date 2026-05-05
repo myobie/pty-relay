@@ -786,6 +786,57 @@ function createFontSizeController(term2, fit, initial = loadFontSize()) {
   };
 }
 
+// browser/src/keyboard-mode.ts
+var STORAGE_KEY2 = "pty-relay:keyboard-mode";
+var VALID = ["assisted", "raw"];
+var DEFAULT_MODE = "assisted";
+function loadKeyboardMode() {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY2);
+    if (raw && VALID.includes(raw)) {
+      return raw;
+    }
+  } catch {
+  }
+  return DEFAULT_MODE;
+}
+function saveKeyboardMode(mode) {
+  try {
+    localStorage.setItem(STORAGE_KEY2, mode);
+  } catch {
+  }
+}
+function applyKeyboardMode(textarea, mode) {
+  if (mode === "raw") {
+    textarea.setAttribute("autocorrect", "off");
+    textarea.setAttribute("autocapitalize", "off");
+    textarea.setAttribute("autocomplete", "off");
+    textarea.setAttribute("spellcheck", "false");
+  } else {
+    textarea.setAttribute("autocorrect", "on");
+    textarea.setAttribute("autocapitalize", "sentences");
+    textarea.setAttribute("autocomplete", "on");
+    textarea.setAttribute("spellcheck", "true");
+  }
+}
+function createKeyboardModeController(textarea, onChange) {
+  let mode = loadKeyboardMode();
+  applyKeyboardMode(textarea, mode);
+  if (onChange) onChange(mode);
+  function set(next) {
+    if (next === mode) return;
+    mode = next;
+    applyKeyboardMode(textarea, mode);
+    saveKeyboardMode(mode);
+    if (onChange) onChange(mode);
+  }
+  return {
+    current: () => mode,
+    set,
+    toggle: () => set(mode === "assisted" ? "raw" : "assisted")
+  };
+}
+
 // browser/src/toast.ts
 var STACK_ID = "pty-toast-stack";
 var TOAST_DURATION_MS = 6e3;
@@ -1768,8 +1819,23 @@ var textInputBar = document.getElementById("text-input-bar");
 var textInput = document.getElementById("text-input");
 var textSendBtn = document.getElementById("text-send-btn");
 var textBackBtn = document.getElementById("text-back-btn");
+var kbModeBtn = document.getElementById("kb-mode-btn");
 var kbReopen = document.getElementById("kb-reopen");
 var keyboard = document.getElementById("keyboard");
+var keyboardModeController = createKeyboardModeController(textInput, (mode) => {
+  if (mode === "raw") {
+    kbModeBtn.textContent = "ABC";
+    kbModeBtn.setAttribute("aria-pressed", "true");
+    kbModeBtn.title = "Keyboard assist OFF \u2014 autocorrect / autocapitalize disabled. Click to re-enable.";
+  } else {
+    kbModeBtn.textContent = "abc";
+    kbModeBtn.setAttribute("aria-pressed", "false");
+    kbModeBtn.title = "Keyboard assist ON \u2014 autocorrect / autocapitalize enabled. Click to disable.";
+  }
+});
+kbModeBtn.addEventListener("click", () => {
+  keyboardModeController.toggle();
+});
 var stickyCtrl = false;
 var lockedCtrl = false;
 var lastCtrlTap = 0;
