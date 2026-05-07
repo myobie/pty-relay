@@ -38,6 +38,15 @@ Pre-1.0 we reserve the right to break on minor bumps.
   behavior shows a confirm() so users can review the URL before
   navigating (visible label can mismatch the underlying target).
   Issue #2.
+- `pty-relay server reset --email <addr>` requests an account-key
+  reset from the public relay when locked out. Sends an
+  unauthenticated POST to `/api/account/reset`; the relay emails a
+  confirmation link gated by a current TOTP code. Confirming
+  revokes every key on the account but leaves the account, emails,
+  TOTP secret, and ACLs intact — re-enroll a fresh daemon with
+  `pty-relay server signin --email <addr>`. The relay returns
+  `{status: "maybe_sent"}` regardless of whether the email matches
+  a real account, so this command never enumerates accounts.
 
 ### Fixed
 

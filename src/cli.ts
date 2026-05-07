@@ -734,6 +734,19 @@ async function dispatchServer(): Promise<void> {
       break;
     }
 
+    case "reset": {
+      const email = getFlag("--email");
+      if (!email) {
+        console.error(
+          "Usage: pty-relay server reset --email <addr> [--relay <url>]"
+        );
+        process.exit(1);
+      }
+      const { resetCommand } = await import("./commands/server/reset.ts");
+      await resetCommand({ email: email!, relayUrl });
+      break;
+    }
+
     default:
       console.error(`Unknown server subcommand: ${subcommand}`);
       serverUsage();
@@ -766,6 +779,9 @@ Subcommands:
                                    --force for THIS device; -y to skip the prompt
   add-email <email>               Add a secondary email to the account
   delete-account [-y]             Permanently delete the account (prompts)
+  reset --email <addr>            Request an account-key reset email
+                                   (locked-out recovery; no local state needed.
+                                   Confirm in the linked form with your TOTP.)
 
 Options:
   --relay <url>                   Relay origin for signin (default: http://localhost:4000)

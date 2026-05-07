@@ -99,6 +99,19 @@ describe("CLI", () => {
     expect(stdout).toContain("Commands:");
   });
 
+  it("`server reset` without --email prints usage and exits non-zero", () => {
+    const { stderr, exitCode } = runCli(["server", "reset"]);
+    expect(stderr).toContain("Usage: pty-relay server reset");
+    expect(stderr).toContain("--email");
+    expect(exitCode).toBe(1);
+  });
+
+  it("`server --help` lists the reset subcommand", () => {
+    const { stdout, exitCode } = runCli(["server", "--help"]);
+    expect(exitCode).toBe(0);
+    expect(stdout).toContain("reset");
+  });
+
   it("--version prints the package version and exits 0", () => {
     const { stdout, exitCode } = runCli(["--version"]);
     expect(stdout).toMatch(/pty-relay \d+\.\d+\.\d+/);
