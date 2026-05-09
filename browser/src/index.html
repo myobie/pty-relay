@@ -2,8 +2,11 @@
 <html lang="en">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1, interactive-widget=resizes-content">
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover, interactive-widget=resizes-content">
   <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="theme-color" content="#0a0a0a">
   <title>pty relay</title>
   <link rel="stylesheet" href="/vendor/xterm.css">
   <script type="importmap">
@@ -27,25 +30,55 @@
       --btn-locked: #88a;
     }
     * { box-sizing: border-box; margin: 0; padding: 0; }
-    /* Belt-and-suspenders horizontal-overflow guard. iOS Safari will
-       happily let a single misbehaving descendant push the document's
-       horizontal scrollWidth past the visual viewport (most often a
-       long cwd path or a branch name in a session row) and then land
-       the page scrolled left of zero on first paint, hiding the start
-       of every line. body { overflow: hidden } only constrains body's
-       own scroll — the document/html layer can still scroll on iOS.
-       Setting overflow-x: hidden on both html and body kills it. */
-    html { overflow-x: hidden; }
+    /* Lock the document so the browser's own scroll can never engage.
+       Combined effect of these rules:
+         - `overscroll-behavior: none` on html+body kills the pull-to-
+           refresh and rubber-band hooks on iOS 16+, Chrome, Firefox.
+         - `overflow: hidden` on BOTH the html and body layers — body
+            alone is not enough on iOS, the document layer can still
+            present a scroll surface.
+         - `position: fixed; top:0; left:0; right:0` on body anchors it
+            to the top of the layout viewport. With `height: var(--vh)`
+            (driven from visualViewport.height), body shrinks when the
+            soft keyboard opens so the toolbar/terminal/keyboard
+            chrome fits in the visible region without the document
+            having to scroll the input back into view.
+         - `touch-action: manipulation` disables iOS double-tap-to-zoom
+           (a 300ms input-delay tax) while leaving inner-scroller
+           panning untouched.
+         - `viewport-fit=cover` + safe-area padding pad against the
+           iOS notch / home indicator on iPhones with a physical
+           cutout, so toolbar buttons don't sit under the status bar.
+       Internal scrollers (`#session-list`, the terminal scrollback)
+       live inside their own clipped boxes with `overscroll-behavior:
+       contain` so their inertia stops at their edges instead of
+       bubbling out to the document.
+       Net effect: the page is a fixed pane; nothing the user does at
+       the document level scrolls. */
+    html, body {
+      overscroll-behavior: none;
+      overflow: hidden;
+      touch-action: manipulation;
+      width: 100%;
+    }
+    html { height: 100%; }
     body {
       background: var(--bg);
       color: var(--fg);
       font-family: 'SF Mono', 'Menlo', 'Consolas', 'Monaco', monospace;
+      position: fixed;
+      top: 0;
+      left: 0;
+      right: 0;
       height: var(--vh);
-      width: 100%;
-      max-width: 100vw;
-      overflow: hidden;
       display: flex;
       flex-direction: column;
+      /* Pad against iOS notch / home indicator. No-op on devices
+         without a cutout. */
+      padding-top: env(safe-area-inset-top);
+      padding-right: env(safe-area-inset-right);
+      padding-bottom: env(safe-area-inset-bottom);
+      padding-left: env(safe-area-inset-left);
     }
 
     /* --- Session List (TUI-style) ---
@@ -68,16 +101,23 @@
     #session-list {
       display: none;
       flex-direction: column;
-      height: var(--vh);
+      flex: 1;
+      min-height: 0;
       width: 100%;
       max-width: 100%;
       padding: 16px 20px;
       /* overflow-y: auto promotes overflow-x to auto per the CSS
          spec when the other axis is `visible`. Set both explicitly
          so a long cwd / tag value can't trigger horizontal scroll —
-         it should clip cleanly within the row's ellipsis instead. */
+         it should clip cleanly within the row's ellipsis instead.
+         overscroll-behavior: contain stops this scroller's inertia
+         from bubbling out and reaching the document — important
+         on iOS where reaching the top/bottom of an inner scroller
+         would otherwise re-engage the document's pull-to-refresh
+         even with body locked. */
       overflow-x: hidden;
       overflow-y: auto;
+      overscroll-behavior: contain;
       font-family: 'SF Mono', 'Menlo', 'Consolas', 'Monaco', monospace;
       font-size: 13px;
     }
@@ -327,7 +367,9 @@
     #terminal-view {
       display: none;
       flex-direction: column;
-      height: var(--vh);
+      flex: 1;
+      min-height: 0;
+      width: 100%;
     }
     #toolbar {
       display: flex;
@@ -458,6 +500,80 @@
       to { transform: translateX(20px); opacity: 0; }
     }
 
+    /* Text-selection overlay (mobile-friendly). xterm.js renders into
+       a canvas so iOS native long-press selection has nothing to grab;
+       we render a snapshot of the buffer in a `<pre>` so the system
+       selection UI can attach. Full-screen, dark TUI styling, dismiss
+       by tapping outside the panel or hitting Close. */
+    #text-select-overlay {
+      position: fixed;
+      inset: 0;
+      z-index: 10001;
+      background: rgba(0, 0, 0, 0.85);
+      display: flex;
+      flex-direction: column;
+      padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);
+      animation: tso-fade-in 120ms ease;
+    }
+    @keyframes tso-fade-in { from { opacity: 0; } to { opacity: 1; } }
+    #text-select-overlay .tso-header {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 8px 12px;
+      background: #111;
+      border-bottom: 1px solid #333;
+      flex: 0 0 auto;
+    }
+    #text-select-overlay .tso-title {
+      flex: 1;
+      color: #888;
+      font-size: 12px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    #text-select-overlay .tso-btn {
+      background: var(--btn-bg);
+      color: var(--fg);
+      border: none;
+      border-radius: 2px;
+      padding: 8px 14px;
+      font-size: 13px;
+      cursor: pointer;
+      flex: 0 0 auto;
+    }
+    #text-select-overlay .tso-btn.tso-copied {
+      background: #234;
+      color: var(--accent);
+    }
+    #text-select-overlay .tso-close { background: #2a2a2a; }
+    #text-select-overlay .tso-text {
+      flex: 1;
+      min-height: 0;
+      overflow: auto;
+      overscroll-behavior: contain;
+      padding: 12px 14px;
+      margin: 0;
+      background: #0a0a0a;
+      color: var(--fg);
+      font-family: 'SF Mono', 'Menlo', 'Consolas', 'Monaco', monospace;
+      /* Selection MUST work — override any inherited `user-select:
+         none` from .kb-btn etc. and add the iOS-specific opt-in
+         (`-webkit-touch-callout: default` enables long-press menus
+         on touch devices that have them disabled by default). */
+      -webkit-user-select: text;
+      user-select: text;
+      -webkit-touch-callout: default;
+      /* Wrap rather than horizontal-scroll: long lines on a phone
+         become unreadable and break the selection flow. white-space:
+         pre-wrap preserves the line breaks but lets long lines wrap. */
+      white-space: pre-wrap;
+      word-break: break-all;
+      font-size: 13px;
+      line-height: 1.4;
+    }
+
     /* Health indicator: small filled circle, color reflects current
        connection state. data-state controls color via attribute
        selectors so JS only needs setAttribute. */
@@ -476,7 +592,14 @@
     .health-indicator[data-state="bad"]  { background: #c44; box-shadow: 0 0 5px #c44; }
     #terminal-container {
       flex: 1;
+      min-height: 0;
       overflow: hidden;
+      /* `contain` lets the browser skip layout/paint outside this
+         box when only its descendants change (xterm rerenders are
+         frequent). Big win on mobile Safari, which otherwise
+         invalidates the whole document on every renderer paint
+         under certain GPU/canvas combinations. */
+      contain: strict;
     }
 
     /* --- Mobile Keyboard --- */
@@ -487,6 +610,7 @@
     #quick-bar {
       display: flex;
       overflow-x: auto;
+      overscroll-behavior: contain;
       padding: 4px 6px;
       gap: 4px;
       -webkit-overflow-scrolling: touch;
@@ -545,7 +669,14 @@
       min-height: calc(1em * 1.4 + 12px);
       max-height: calc(3em * 1.4 + 12px);
       overflow-y: auto;
+      overscroll-behavior: contain;
+      /* Hide the inner scrollbar past the 3-line cap. The textarea
+         is still scrollable internally; suppressing the visible
+         scrollbar keeps the bottom bar visually quiet (matches the
+         "no scrollbars on this page, ever" UX directive). */
+      scrollbar-width: none;
     }
+    #text-input-bar textarea::-webkit-scrollbar { display: none; }
     #text-input-bar button {
       background: var(--accent);
       color: #fff;
@@ -578,7 +709,8 @@
       display: flex;
       align-items: center;
       justify-content: center;
-      height: var(--vh);
+      flex: 1;
+      min-height: 0;
       font-size: 15px;
       color: #666;
     }
@@ -617,6 +749,7 @@
       <button id="info-btn" title="Show session details (tags, cwd, age)" aria-expanded="false" aria-controls="session-info-panel">Info</button>
       <button id="font-smaller-btn" title="Smaller terminal font" aria-label="Smaller terminal font">A−</button>
       <button id="font-larger-btn" title="Larger terminal font" aria-label="Larger terminal font">A+</button>
+      <button id="select-btn" title="Open buffer in a selectable overlay (long-press to select on mobile)">Sel</button>
       <button id="stats-btn" title="Copy latency stats to clipboard">Stats</button>
       <button id="detach-btn">Detach</button>
     </div>

@@ -1031,6 +1031,87 @@ function registerOscHandlers(term2, fallbackTitle) {
   };
 }
 
+// browser/src/text-select-overlay.ts
+function openTextSelectOverlay(term2) {
+  const text = extractBufferText(term2);
+  document.getElementById("text-select-overlay")?.remove();
+  const overlay = document.createElement("div");
+  overlay.id = "text-select-overlay";
+  const header = document.createElement("div");
+  header.className = "tso-header";
+  const title = document.createElement("span");
+  title.className = "tso-title";
+  title.textContent = "Long-press to select";
+  const copyBtn = document.createElement("button");
+  copyBtn.type = "button";
+  copyBtn.className = "tso-btn";
+  copyBtn.textContent = "Copy All";
+  const closeBtn = document.createElement("button");
+  closeBtn.type = "button";
+  closeBtn.className = "tso-btn tso-close";
+  closeBtn.textContent = "Close";
+  const pre = document.createElement("pre");
+  pre.className = "tso-text";
+  pre.textContent = text;
+  copyBtn.addEventListener("click", async () => {
+    try {
+      await navigator.clipboard.writeText(text);
+      flashCopied(copyBtn);
+      return;
+    } catch {
+    }
+    selectAll(pre);
+  });
+  closeBtn.addEventListener("click", () => {
+    overlay.remove();
+  });
+  overlay.addEventListener("click", (e) => {
+    if (e.target === overlay) overlay.remove();
+  });
+  header.appendChild(title);
+  header.appendChild(copyBtn);
+  header.appendChild(closeBtn);
+  overlay.appendChild(header);
+  overlay.appendChild(pre);
+  document.body.appendChild(overlay);
+  return {
+    close() {
+      overlay.remove();
+    }
+  };
+}
+function extractBufferText(term2) {
+  const buf = term2.buffer.active;
+  const len = buf.length;
+  const lines = [];
+  for (let i = 0; i < len; i++) {
+    const line = buf.getLine(i);
+    if (!line) continue;
+    lines.push(line.translateToString(true));
+  }
+  while (lines.length > 0 && lines[lines.length - 1] === "") {
+    lines.pop();
+  }
+  return lines.join("\n");
+}
+function selectAll(el) {
+  const range = document.createRange();
+  range.selectNodeContents(el);
+  const sel = window.getSelection();
+  if (!sel) return;
+  sel.removeAllRanges();
+  sel.addRange(range);
+}
+function flashCopied(btn) {
+  const prev = btn.textContent;
+  btn.textContent = "Copied";
+  btn.classList.add("tso-copied");
+  setTimeout(() => {
+    btn.textContent = prev;
+    btn.classList.remove("tso-copied");
+  }, 800);
+}
+
 // browser/src/main.ts
 var MSG_DATA = 0;
 var MSG_DETACH = 2;
@@ -1341,6 +1422,7 @@ var latencyStatEl = document.getElementById("latency-stat");
 var healthIndicatorEl = document.getElementById("health-indicator");
 var fontSmallerBtn = document.getElementById("font-smaller-btn");
 var fontLargerBtn = document.getElementById("font-larger-btn");
+var selectBtn = document.getElementById("select-btn");
 var infoBtn = document.getElementById("info-btn");
 var sessionInfoPanel = document.getElementById("session-info-panel");
 var lastWsFrameAtMs = 0;
@@ -1377,14 +1459,19 @@ function showStatus(msg) {
   statusOverlay.textContent = msg;
   showView("loading");
 }
+var vhFrame = null;
 function updateVh() {
-  const vh = window.visualViewport?.height ?? window.innerHeight;
-  document.documentElement.style.setProperty("--vh", `${vh}px`);
+  if (vhFrame !== null) return;
+  vhFrame = requestAnimationFrame(() => {
+    vhFrame = null;
+    const vh = window.visualViewport?.height ?? window.innerHeight;
+    document.documentElement.style.setProperty("--vh", `${vh}px`);
+  });
 }
 window.visualViewport?.addEventListener("resize", updateVh);
-window.visualViewport?.addEventListener("scroll", updateVh);
 window.addEventListener("resize", updateVh);
 updateVh();
+window.addEventListener("scroll", () => pinDocumentScroll(), { passive: true });
 var transport = null;
 var ws = null;
 var term = null;
@@ -1407,6 +1494,22 @@ function setUrlSession(session, mode = "replace") {
 function bindTerminalTitle(t, fallbackName) {
   t.onTitleChange((title) => {
     document.title = title && title.length > 0 ? title : fallbackName;
+  });
+}
+function makeCoalescedFitObserver() {
+  let pending = false;
+  return new ResizeObserver(() => {
+    if (pending) return;
+    pending = true;
+    requestAnimationFrame(() => {
+      pending = false;
+      if (fitAddon && term) {
+        try {
+          fitAddon.fit();
+        } catch {
+        }
+      }
+    });
   });
 }
 function settledFit(term2, fit) {
@@ -1658,9 +1761,7 @@ function attachToSession(sessionName, _cols, _rows) {
     term.open(terminalContainer);
     loadWebglRenderer(term);
     settledFit(term, fitAddon);
-    resizeObserver = new ResizeObserver(() => {
-      if (fitAddon && term) fitAddon.fit();
-    });
+    resizeObserver = makeCoalescedFitObserver();
     resizeObserver.observe(terminalContainer);
     term.onResize(({ cols: cols2, rows: rows2 }) => {
       if (sessionAttached) sendPtyPacket(makeResize(rows2, cols2));
@@ -1716,9 +1817,7 @@ function handleDecryptedMessage(plaintext) {
           term.open(terminalContainer);
           loadWebglRenderer(term);
           settledFit(term, fitAddon);
-          resizeObserver = new ResizeObserver(() => {
-            if (fitAddon && term) fitAddon.fit();
-          });
+          resizeObserver = makeCoalescedFitObserver();
           resizeObserver.observe(terminalContainer);
           term.onResize(({ cols, rows }) => {
             if (sessionAttached) sendPtyPacket(makeResize(rows, cols));
@@ -1894,6 +1993,10 @@ fontSmallerBtn.addEventListener("click", () => {
 fontLargerBtn.addEventListener("click", () => {
   if (fontSizeController) fontSizeController.bump(1);
 });
+selectBtn?.addEventListener("click", () => {
+  if (!term) return;
+  openTextSelectOverlay(term);
+});
 detachBtn.addEventListener("click", () => {
   if (sessionAttached) sendPtyPacket(makeDetach());
   sessionAttached = false;
@@ -2048,14 +2151,24 @@ function setKbMode(mode) {
   if (mode === "panel") document.activeElement?.blur();
   if (mode === "text") {
     textInput.focus({ preventScroll: true });
-    requestAnimationFrame(() => {
-      window.scrollTo(0, 0);
-      document.documentElement.scrollTop = 0;
-      document.body.scrollTop = 0;
-    });
+    pinDocumentScroll();
+    requestAnimationFrame(pinDocumentScroll);
+    setTimeout(pinDocumentScroll, 100);
+    setTimeout(pinDocumentScroll, 300);
   }
   if (mode === "bar" && term) term.focus();
   updateVh();
+}
+function pinDocumentScroll() {
+  if (window.scrollX !== 0 || window.scrollY !== 0) {
+    window.scrollTo(0, 0);
+  }
+  if (document.documentElement.scrollTop !== 0) {
+    document.documentElement.scrollTop = 0;
+  }
+  if (document.body.scrollTop !== 0) {
+    document.body.scrollTop = 0;
+  }
 }
 function buildQuickBar() {
   const keys = [

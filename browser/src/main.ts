@@ -422,6 +422,12 @@ const latencyStatEl = document.getElementById("latency-stat")!;
 const healthIndicatorEl = document.getElementById("health-indicator")!;
 const fontSmallerBtn = document.getElementById("font-smaller-btn")!;
 const fontLargerBtn = document.getElementById("font-larger-btn")!;
+// Optional chaining: a stale cached index.html (older deploy) may not
+// have this element. Falling through with `null` here is fine — the
+// `addEventListener` call below is null-guarded so a missing button
+// just disables the feature instead of crashing the whole script
+// before main() runs.
+const selectBtn = document.getElementById("select-btn") as HTMLButtonElement | null;
 const infoBtn = document.getElementById("info-btn")!;
 const sessionInfoPanel = document.getElementById("session-info-panel")!;
 
@@ -478,15 +484,46 @@ function showStatus(msg: string): void {
   showView("loading");
 }
 
+/** Sync the `--vh` CSS variable with the *visual* viewport (which
+ *  shrinks when the iOS soft keyboard opens). Coalesced through rAF so
+ *  rapid resize events during keyboard slide-up animations only mutate
+ *  the CSS var once per frame instead of once per resize event —
+ *  writing a custom property on `:root` invalidates style across the
+ *  whole document, which is one of the hotter paths on iOS Safari.
+ *
+ *  Crucially we do NOT listen on `visualViewport.scroll`: with the
+ *  document layer locked (html/body overflow:hidden + position:fixed
+ *  on body), the visual viewport doesn't scroll — but iOS still emits
+ *  `scroll` events during pinch-zoom and during the URL-bar collapse
+ *  animation, and reacting to those by re-writing --vh causes a
+ *  style-recalc storm. Resize is the only real signal we need. */
+let vhFrame: number | null = null;
 function updateVh(): void {
-  const vh = window.visualViewport?.height ?? window.innerHeight;
-  document.documentElement.style.setProperty("--vh", `${vh}px`);
+  if (vhFrame !== null) return;
+  vhFrame = requestAnimationFrame(() => {
+    vhFrame = null;
+    const vh = window.visualViewport?.height ?? window.innerHeight;
+    document.documentElement.style.setProperty("--vh", `${vh}px`);
+  });
 }
 
 window.visualViewport?.addEventListener("resize", updateVh);
-window.visualViewport?.addEventListener("scroll", updateVh);
 window.addEventListener("resize", updateVh);
 updateVh();
+
+/** iOS Safari force-scrolls the document to keep a focused input
+ *  visible above the soft keyboard, even when html/body have
+ *  `overflow: hidden` and `overscroll-behavior: none` and body is
+ *  `position: fixed`. The mutation hits document.scrollingElement
+ *  directly and bypasses our overflow lock, exposing a scroll bar /
+ *  shifted layout while the textarea is focused.
+ *
+ *  Snap-back guard: any time the document accumulates a non-zero
+ *  scroll offset, force it back to (0, 0). Listener is passive so
+ *  it never blocks the main thread; the equality check inside
+ *  pinDocumentScroll() makes the listener a no-op when our locks
+ *  are already holding (the common case). */
+window.addEventListener("scroll", () => pinDocumentScroll(), { passive: true });
 
 // ── Connection state ──
 
@@ -536,6 +573,25 @@ function setUrlSession(session: string | null, mode: "push" | "replace" = "repla
 function bindTerminalTitle(t: Terminal, fallbackName: string): void {
   t.onTitleChange((title) => {
     document.title = (title && title.length > 0) ? title : fallbackName;
+  });
+}
+
+/** Coalesce ResizeObserver entries through requestAnimationFrame.
+ *  ResizeObserver fires every layout pass during the iOS keyboard
+ *  show/hide animation (~60Hz × ~300ms = ~18 callbacks). Each fit()
+ *  measures the canvas and walks xterm's renderer; calling 18× per
+ *  keyboard slide-up is wasted work. Collapse to once-per-frame. */
+function makeCoalescedFitObserver(): ResizeObserver {
+  let pending = false;
+  return new ResizeObserver(() => {
+    if (pending) return;
+    pending = true;
+    requestAnimationFrame(() => {
+      pending = false;
+      if (fitAddon && term) {
+        try { fitAddon.fit(); } catch {}
+      }
+    });
   });
 }
 
@@ -917,9 +973,7 @@ function attachToSession(sessionName: string, _cols: number, _rows: number): voi
     term.open(terminalContainer as HTMLElement);
     loadWebglRenderer(term);
     settledFit(term, fitAddon);
-    resizeObserver = new ResizeObserver(() => {
-      if (fitAddon && term) fitAddon.fit();
-    });
+    resizeObserver = makeCoalescedFitObserver();
     resizeObserver.observe(terminalContainer);
     term.onResize(({ cols: cols2, rows: rows2 }) => {
       if (sessionAttached) sendPtyPacket(makeResize(rows2, cols2));
@@ -982,9 +1036,7 @@ function handleDecryptedMessage(plaintext: Uint8Array): void {
           term.open(terminalContainer as HTMLElement);
           loadWebglRenderer(term);
           settledFit(term, fitAddon);
-          resizeObserver = new ResizeObserver(() => {
-            if (fitAddon && term) fitAddon.fit();
-          });
+          resizeObserver = makeCoalescedFitObserver();
           resizeObserver.observe(terminalContainer);
           term.onResize(({ cols, rows }) => {
             if (sessionAttached) sendPtyPacket(makeResize(rows, cols));
@@ -1085,6 +1137,7 @@ import {
   type KeyboardMode,
 } from "./keyboard-mode.ts";
 import { registerOscHandlers as registerNotificationOscHandlers } from "./notifications.ts";
+import { openTextSelectOverlay } from "./text-select-overlay.ts";
 
 function spawnSession(name: string, cwd?: string): void {
   showStatus("Starting session...");
@@ -1235,6 +1288,17 @@ fontSmallerBtn.addEventListener("click", () => {
 });
 fontLargerBtn.addEventListener("click", () => {
   if (fontSizeController) fontSizeController.bump(+1);
+});
+
+// "Sel" — open the text-selection overlay for the active terminal.
+// Mobile Safari can't natively long-press-select inside the WebGL
+// canvas xterm renders into; the overlay snapshots the buffer to a
+// `<pre>` so the system selection UI can attach. Desktop users can
+// still use mouse-drag selection on xterm directly, but the overlay
+// works for them too.
+selectBtn?.addEventListener("click", () => {
+  if (!term) return;
+  openTextSelectOverlay(term);
 });
 
 detachBtn.addEventListener("click", () => {
@@ -1424,20 +1488,35 @@ function setKbMode(mode: "bar" | "panel" | "text" | "hidden"): void {
   kbReopen.style.display = mode === "hidden" ? "block" : "none";
   if (mode === "panel") (document.activeElement as HTMLElement | null)?.blur();
   if (mode === "text") {
-    // preventScroll handles the scrollIntoView part, but iOS Safari
-    // ALSO mutates document.scrollingElement.scrollTop to keep the
-    // input above the soft keyboard, which our overflow:hidden body
-    // can't prevent. Snap back to (0,0) on the next frame so the
-    // layout stays anchored.
+    // preventScroll asks the browser not to scroll into view. iOS
+    // Safari ignores it and force-scrolls the document anyway when a
+    // textarea is focused below the soft keyboard. The window-scroll
+    // snap-back listener catches that, but it fires AFTER the layout
+    // has already shifted (visible scroll bar flicker) — the explicit
+    // scrollTo(0,0) ladder below pre-empts the shift on the same
+    // tick the keyboard slides in.
     textInput.focus({ preventScroll: true });
-    requestAnimationFrame(() => {
-      window.scrollTo(0, 0);
-      document.documentElement.scrollTop = 0;
-      document.body.scrollTop = 0;
-    });
+    pinDocumentScroll();
+    requestAnimationFrame(pinDocumentScroll);
+    setTimeout(pinDocumentScroll, 100);
+    setTimeout(pinDocumentScroll, 300);
   }
   if (mode === "bar" && term) term.focus();
   updateVh();
+}
+
+function pinDocumentScroll(): void {
+  if (window.scrollX !== 0 || window.scrollY !== 0) {
+    window.scrollTo(0, 0);
+  }
+  // Belt-and-suspenders: iOS occasionally mutates documentElement /
+  // body scrollTop directly without going through window.scrollTo.
+  if (document.documentElement.scrollTop !== 0) {
+    document.documentElement.scrollTop = 0;
+  }
+  if (document.body.scrollTop !== 0) {
+    document.body.scrollTop = 0;
+  }
 }
 
 interface KeyDef {
