@@ -43,6 +43,19 @@
             soft keyboard opens so the toolbar/terminal/keyboard
             chrome fits in the visible region without the document
             having to scroll the input back into view.
+         - html *also* uses `height: var(--vh)`. iOS Safari does not
+            shrink the layout viewport when the soft keyboard opens —
+            it ignores `interactive-widget=resizes-content` and
+            renders the keyboard as an overlay (this is the
+            documented behavior on iOS 16; iOS 17 added partial
+            support but only on form-target keyboards). If html stays
+            at the layout viewport's full height while body shrinks
+            to var(--vh), the difference is "empty document space"
+            inside html that iOS happily rubber-bands into when the
+            user pans near the top/bottom — visible as a few pixels
+            of scroll while the textarea is focused. Sizing html to
+            var(--vh) too makes the document exactly as tall as the
+            visible region; there is no extra space to scroll into.
          - `touch-action: manipulation` disables iOS double-tap-to-zoom
            (a 300ms input-delay tax) while leaving inner-scroller
            panning untouched.
@@ -60,17 +73,21 @@
       overflow: hidden;
       touch-action: manipulation;
       width: 100%;
+      height: var(--vh);
     }
-    html { height: 100%; }
     body {
       background: var(--bg);
       color: var(--fg);
       font-family: 'SF Mono', 'Menlo', 'Consolas', 'Monaco', monospace;
+      /* `position: fixed` belt-and-suspenders. With both html and
+         body sized to var(--vh), the document already collapses to
+         the visible region — but iOS Safari has had historical bugs
+         where focusing an input still mutated body.scrollTop. Fixing
+         body removes any residual scroll surface inside it. */
       position: fixed;
       top: 0;
       left: 0;
       right: 0;
-      height: var(--vh);
       display: flex;
       flex-direction: column;
       /* Pad against iOS notch / home indicator. No-op on devices

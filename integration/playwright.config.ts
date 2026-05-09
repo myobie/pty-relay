@@ -31,7 +31,7 @@ export default defineConfig({
       // hasTouch + mobile viewport is sufficient.
       name: "mobile",
       use: { ...devices["Pixel 7"] },
-      testMatch: "web-mobile.spec.ts",
+      testMatch: ["web-mobile.spec.ts", "web-mobile-keyboard.spec.ts"],
     },
   ],
 });
