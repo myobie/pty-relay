@@ -2308,6 +2308,7 @@ function maybeFocusTerm() {
   if (keyboardUp) term.focus();
 }
 var TAP_SLOP_PX = 10;
+var MOUSE_SWALLOW_WINDOW_MS = 500;
 var touchStartY = 0;
 var scrollPixelOffset = 0;
 var touchVelocity = 0;
@@ -2315,6 +2316,10 @@ var lastTouchY = 0;
 var lastTouchTime = 0;
 var inertiaFrame = null;
 var gestureIsScroll = false;
+var swallowMouseUntil = 0;
+function swallowSyntheticMouse() {
+  swallowMouseUntil = Date.now() + MOUSE_SWALLOW_WINDOW_MS;
+}
 function getLineHeight() {
   if (term) {
     const canvas = terminalContainer.querySelector("canvas");
@@ -2339,7 +2344,7 @@ terminalContainer.addEventListener(
     if (wasInertiaRunning) {
       cancelAnimationFrame(inertiaFrame);
       inertiaFrame = null;
-      e.preventDefault();
+      swallowSyntheticMouse();
     }
     touchStartY = e.touches[0].clientY;
     lastTouchY = touchStartY;
@@ -2348,7 +2353,7 @@ terminalContainer.addEventListener(
     scrollPixelOffset = 0;
     gestureIsScroll = wasInertiaRunning;
   },
-  { passive: false }
+  { passive: true }
 );
 terminalContainer.addEventListener(
   "touchmove",
@@ -2357,9 +2362,7 @@ terminalContainer.addEventListener(
     if (!gestureIsScroll) {
       if (Math.abs(y - touchStartY) < TAP_SLOP_PX) return;
       gestureIsScroll = true;
-      e.preventDefault();
-    } else {
-      e.preventDefault();
+      swallowSyntheticMouse();
     }
     const dy = lastTouchY - y;
     scrollByPixels(dy);
@@ -2369,7 +2372,7 @@ terminalContainer.addEventListener(
     lastTouchY = y;
     lastTouchTime = now;
   },
-  { passive: false }
+  { passive: true }
 );
 terminalContainer.addEventListener(
   "touchend",
@@ -2389,6 +2392,14 @@ terminalContainer.addEventListener(
   },
   { passive: true }
 );
+var swallowIfArmed = (e) => {
+  if (Date.now() < swallowMouseUntil) {
+    e.preventDefault();
+    e.stopPropagation();
+  }
+};
+terminalContainer.addEventListener("mousedown", swallowIfArmed, { capture: true });
+terminalContainer.addEventListener("click", swallowIfArmed, { capture: true });
 var token = null;
 var currentSession = null;
 var reconnectTimer = null;

@@ -1718,31 +1718,38 @@ function maybeFocusTerm(): void {
 
 // ── Touch scroll with inertia ──
 //
-// Distinguishes "tap" from "scroll" by movement distance. iOS only
-// fires a synthetic `click` event after a touch sequence where the
-// finger barely moved; the click cascades through xterm's helper
-// textarea focus, which pops the soft keyboard. Two-line cure:
+// Distinguishes "tap" from "scroll" so xterm doesn't pop the soft
+// keyboard at the end of an intentional scroll. iOS fires a
+// synthetic `click` (which xterm catches and uses to focus its
+// helper textarea) at the end of any touch sequence where the
+// finger moved less than the system tap threshold — that includes
+// both genuine taps AND the tap-to-stop-an-ongoing-inertia gesture.
 //
-//   1. While the finger is below TAP_SLOP_PX from touchstart, do
-//      nothing — treat the gesture as a possible tap. Synthetic
-//      click is allowed to fire (e.g. user really did mean to tap
-//      a link or focus the terminal).
-//   2. The moment the finger crosses TAP_SLOP_PX, lock the gesture
-//      into "scroll" mode: scrollByPixels for this and every
-//      subsequent move, AND call preventDefault on the touchmove.
-//      Calling preventDefault during a touch sequence on iOS
-//      suppresses the synthetic mouseup/click that would otherwise
-//      arrive on touchend. Result: scroll gestures don't focus the
-//      terminal. Tap gestures still do.
+// We can't preventDefault on a passive touchstart/touchmove, and
+// flipping those to `passive: false` introduced jank on iOS Safari
+// (the main thread blocks on each touch event; visible as the tab
+// stuttering and, in pathological cases, crashing). The safer
+// pattern is to leave the touch listeners passive and swallow the
+// downstream synthetic `mousedown` via a capture-phase listener on
+// terminalContainer. Capture phase runs before xterm's own
+// mousedown handler (which is registered on a descendant), so
+// stopPropagation + preventDefault there stops xterm from seeing
+// the event and therefore from focusing — no keyboard pop.
 //
-// touchmove must be `passive: false` for preventDefault to take
-// effect. We pay a small main-thread scheduling cost in exchange
-// for the gesture discrimination — worth it because the previous
-// `passive: true` configuration was firing a click on every
-// short-distance scroll, which on Codex/TUIs translated to keyboard-
-// popups-during-scrolling.
+// `gestureIsScroll` is set when:
+//   - the gesture began as an interrupt of an active inertia
+//     (tap-to-stop-scroll: user's intent is "stop", not "focus")
+//   - cumulative finger movement crossed TAP_SLOP_PX (it's a real
+//     drag-to-scroll, not a tap)
+// In either case the next mousedown reaching terminalContainer is
+// swallowed in capture phase.
 
 const TAP_SLOP_PX = 10;
+/** How long after the touch sequence ends to keep swallowing
+ *  synthetic mouse events. iOS dispatches them ~10-300ms after
+ *  touchend; 500ms is generous and self-clears so a later real
+ *  click still works. */
+const MOUSE_SWALLOW_WINDOW_MS = 500;
 
 let touchStartY = 0;
 let scrollPixelOffset = 0;
@@ -1751,6 +1758,11 @@ let lastTouchY = 0;
 let lastTouchTime = 0;
 let inertiaFrame: number | null = null;
 let gestureIsScroll = false;
+let swallowMouseUntil = 0;
+
+function swallowSyntheticMouse(): void {
+  swallowMouseUntil = Date.now() + MOUSE_SWALLOW_WINDOW_MS;
+}
 
 function getLineHeight(): number {
   if (term) {
@@ -1778,46 +1790,39 @@ terminalContainer.addEventListener(
     if (wasInertiaRunning) {
       cancelAnimationFrame(inertiaFrame!);
       inertiaFrame = null;
-      // Tap-during-inertia means the user wants to STOP scrolling.
-      // Without preventDefault here, iOS still fires a synthetic
-      // click on touchend — which xterm catches and uses to focus
-      // its helper textarea, popping the soft keyboard. That's the
-      // "tap stops scroll AND brings up keyboard" symptom. Calling
-      // preventDefault on touchstart suppresses synthetic mouse
-      // events for the entire touch sequence, so the tap only does
-      // the one job the user intended.
-      e.preventDefault();
+      // Tap-during-inertia means "stop scrolling", not "focus" —
+      // arm the synthetic-mouse swallow for the trailing mousedown
+      // iOS is about to dispatch.
+      swallowSyntheticMouse();
     }
     touchStartY = e.touches[0].clientY;
     lastTouchY = touchStartY;
     lastTouchTime = Date.now();
     touchVelocity = 0;
     scrollPixelOffset = 0;
-    // Pre-flag the gesture as scroll if we were already scrolling
-    // (inertia interrupt). Otherwise this is a fresh gesture and we
-    // don't know yet — touchmove decides based on the tap-slop
-    // threshold.
+    // Inertia-interrupt is the only way a fresh gesture can start
+    // already known-scroll. Otherwise the move handler decides.
     gestureIsScroll = wasInertiaRunning;
   },
-  { passive: false }
+  { passive: true }
 );
 terminalContainer.addEventListener(
   "touchmove",
   (e: TouchEvent) => {
     const y = e.touches[0].clientY;
     if (!gestureIsScroll) {
-      // Still in the tap-slop dead zone. If we've now exceeded the
-      // threshold, commit to scroll mode and suppress the synthetic
-      // click. Otherwise just observe — don't scroll, don't
-      // preventDefault (lets a real tap fire its click cleanly).
+      // Below tap-slop, this is still possibly a tap; do nothing.
+      // Synthetic mouse events for the tap can fire normally on
+      // touchend.
       if (Math.abs(y - touchStartY) < TAP_SLOP_PX) return;
       gestureIsScroll = true;
-      e.preventDefault();
-    } else {
-      // Already in scroll mode — keep preventing default so iOS
-      // doesn't try to scroll the (locked) document AND so we
-      // continue suppressing synthetic mouse events.
-      e.preventDefault();
+      // We're committing to scroll. Swallow the synthetic mouse
+      // events that would otherwise fire on touchend. iOS suppresses
+      // them on its own when the gesture exceeds its own tap
+      // threshold (~10px), but the swallow is belt-and-suspenders
+      // for browsers with looser thresholds and for the
+      // tap-after-tiny-nudge case.
+      swallowSyntheticMouse();
     }
     const dy = lastTouchY - y;
     scrollByPixels(dy);
@@ -1827,7 +1832,7 @@ terminalContainer.addEventListener(
     lastTouchY = y;
     lastTouchTime = now;
   },
-  { passive: false }
+  { passive: true }
 );
 terminalContainer.addEventListener(
   "touchend",
@@ -1847,6 +1852,19 @@ terminalContainer.addEventListener(
   },
   { passive: true }
 );
+
+// Capture-phase mousedown/click swallower. Runs before xterm's own
+// (descendant) mousedown handler, so stopPropagation prevents xterm
+// from focusing its helper textarea. preventDefault prevents the
+// browser's own focus-on-mousedown behavior.
+const swallowIfArmed = (e: Event) => {
+  if (Date.now() < swallowMouseUntil) {
+    e.preventDefault();
+    e.stopPropagation();
+  }
+};
+terminalContainer.addEventListener("mousedown", swallowIfArmed, { capture: true });
+terminalContainer.addEventListener("click", swallowIfArmed, { capture: true });
 
 // ── Connection / reconnect ──
 
