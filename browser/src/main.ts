@@ -1016,7 +1016,7 @@ function handleDecryptedMessage(plaintext: Uint8Array): void {
         return;
       } else if (msg.type === "attached") {
         sessionAttached = true;
-        if (term) term.focus();
+        maybeFocusTerm();
         return;
       } else if (msg.type === "spawned") {
         currentSession = msg.session;
@@ -1430,7 +1430,7 @@ function sendKey(initial: string): void {
     }
   }
   if (sessionAttached) sendPtyPacket(makeData(seq));
-  if (term) term.focus();
+  maybeFocusTerm();
 }
 
 function toggleModifier(which: "ctrl" | "alt"): void {
@@ -1501,7 +1501,7 @@ function setKbMode(mode: "bar" | "panel" | "text" | "hidden"): void {
     setTimeout(pinDocumentScroll, 100);
     setTimeout(pinDocumentScroll, 300);
   }
-  if (mode === "bar" && term) term.focus();
+  if (mode === "bar") maybeFocusTerm();
   updateVh();
 }
 
@@ -1677,6 +1677,45 @@ kbReopen.addEventListener("click", () => setKbMode("bar"));
 buildQuickBar();
 buildKeyPanel();
 
+/** Refocus xterm conditionally.
+ *
+ *  xterm.js stores keyboard focus on a real `<textarea>` overlay
+ *  (`.xterm-helper-textarea`). Focusing it on a touch device pops
+ *  the soft keyboard, because the OS doesn't know it's a hidden
+ *  helper — it's a real input. We used to call `term.focus()`
+ *  whenever virtual keys were pressed and after mode switches; that
+ *  defeats users who have manually dismissed the keyboard (tap on
+ *  the iOS down-arrow / Android back-gesture) by silently re-popping
+ *  it on the next interaction.
+ *
+ *  Heuristic:
+ *    - Desktop (pointer: fine, e.g. mouse/trackpad) — always focus.
+ *      Cursor blink + hardware keyboard routing both need it.
+ *    - Touch-primary (pointer: coarse) — only refresh focus when
+ *      the soft keyboard is already up (visualViewport.height
+ *      noticeably less than innerHeight). When the keyboard is
+ *      down, skip the focus call entirely so a virtual button tap
+ *      can't unilaterally re-open it.
+ *
+ *  Note: skipping focus on mobile does NOT break key delivery — our
+ *  virtual buttons send keystrokes through `sendPtyPacket` (WebSocket
+ *  bypass of xterm's input path); xterm only displays the response.
+ *  All it costs is the cursor-blink visual cue, which most users
+ *  reading TUI output don't notice. */
+function maybeFocusTerm(): void {
+  if (!term) return;
+  const isTouchPrimary = matchMedia("(pointer: coarse)").matches;
+  if (!isTouchPrimary) {
+    term.focus();
+    return;
+  }
+  const vv = window.visualViewport;
+  // ~100px is a generous floor for soft keyboard height — every
+  // shipping mobile keyboard is taller than that.
+  const keyboardUp = !!vv && vv.height < window.innerHeight - 100;
+  if (keyboardUp) term.focus();
+}
+
 // ── Touch scroll with inertia ──
 //
 // Distinguishes "tap" from "scroll" by movement distance. iOS only
@@ -1735,18 +1774,32 @@ function scrollByPixels(dy: number): void {
 terminalContainer.addEventListener(
   "touchstart",
   (e: TouchEvent) => {
-    if (inertiaFrame) {
-      cancelAnimationFrame(inertiaFrame);
+    const wasInertiaRunning = inertiaFrame !== null;
+    if (wasInertiaRunning) {
+      cancelAnimationFrame(inertiaFrame!);
       inertiaFrame = null;
+      // Tap-during-inertia means the user wants to STOP scrolling.
+      // Without preventDefault here, iOS still fires a synthetic
+      // click on touchend — which xterm catches and uses to focus
+      // its helper textarea, popping the soft keyboard. That's the
+      // "tap stops scroll AND brings up keyboard" symptom. Calling
+      // preventDefault on touchstart suppresses synthetic mouse
+      // events for the entire touch sequence, so the tap only does
+      // the one job the user intended.
+      e.preventDefault();
     }
     touchStartY = e.touches[0].clientY;
     lastTouchY = touchStartY;
     lastTouchTime = Date.now();
     touchVelocity = 0;
     scrollPixelOffset = 0;
-    gestureIsScroll = false;
+    // Pre-flag the gesture as scroll if we were already scrolling
+    // (inertia interrupt). Otherwise this is a fresh gesture and we
+    // don't know yet — touchmove decides based on the tap-slop
+    // threshold.
+    gestureIsScroll = wasInertiaRunning;
   },
-  { passive: true }
+  { passive: false }
 );
 terminalContainer.addEventListener(
   "touchmove",

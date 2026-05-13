@@ -1799,7 +1799,7 @@ function handleDecryptedMessage(plaintext) {
         return;
       } else if (msg.type === "attached") {
         sessionAttached = true;
-        if (term) term.focus();
+        maybeFocusTerm();
         return;
       } else if (msg.type === "spawned") {
         currentSession = msg.session;
@@ -2096,7 +2096,7 @@ function sendKey(initial) {
     }
   }
   if (sessionAttached) sendPtyPacket(makeData(seq));
-  if (term) term.focus();
+  maybeFocusTerm();
 }
 function toggleModifier(which) {
   const now = Date.now();
@@ -2156,7 +2156,7 @@ function setKbMode(mode) {
     setTimeout(pinDocumentScroll, 100);
     setTimeout(pinDocumentScroll, 300);
   }
-  if (mode === "bar" && term) term.focus();
+  if (mode === "bar") maybeFocusTerm();
   updateVh();
 }
 function pinDocumentScroll() {
@@ -2296,6 +2296,17 @@ textBackBtn.addEventListener("click", () => setKbMode("bar"));
 kbReopen.addEventListener("click", () => setKbMode("bar"));
 buildQuickBar();
 buildKeyPanel();
+function maybeFocusTerm() {
+  if (!term) return;
+  const isTouchPrimary = matchMedia("(pointer: coarse)").matches;
+  if (!isTouchPrimary) {
+    term.focus();
+    return;
+  }
+  const vv = window.visualViewport;
+  const keyboardUp = !!vv && vv.height < window.innerHeight - 100;
+  if (keyboardUp) term.focus();
+}
 var TAP_SLOP_PX = 10;
 var touchStartY = 0;
 var scrollPixelOffset = 0;
@@ -2324,18 +2335,20 @@ function scrollByPixels(dy) {
 terminalContainer.addEventListener(
   "touchstart",
   (e) => {
-    if (inertiaFrame) {
+    const wasInertiaRunning = inertiaFrame !== null;
+    if (wasInertiaRunning) {
       cancelAnimationFrame(inertiaFrame);
       inertiaFrame = null;
+      e.preventDefault();
     }
     touchStartY = e.touches[0].clientY;
     lastTouchY = touchStartY;
     lastTouchTime = Date.now();
     touchVelocity = 0;
     scrollPixelOffset = 0;
-    gestureIsScroll = false;
+    gestureIsScroll = wasInertiaRunning;
   },
-  { passive: true }
+  { passive: false }
 );
 terminalContainer.addEventListener(
   "touchmove",
