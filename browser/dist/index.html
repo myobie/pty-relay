@@ -71,10 +71,27 @@
     html, body {
       overscroll-behavior: none;
       overflow: hidden;
-      touch-action: manipulation;
       width: 100%;
       height: var(--vh);
+      /* Hide any latent native scrollbar that might appear during
+         layout transitions (Safari sometimes flashes one for a frame
+         while the keyboard slides up). Inner scrollers that DO need
+         scrollbars (terminal scrollback, textarea) suppress them
+         individually too. */
+      scrollbar-width: none;
     }
+    html::-webkit-scrollbar, body::-webkit-scrollbar { display: none; }
+    /* `touch-action: none` on the document root prevents iOS from
+       interpreting body-level pan gestures as scroll attempts (which
+       it tries even with overflow:hidden — the gesture just snaps
+       back, which is the visible-jitter the user reports as "still
+       some scroll"). Touch events themselves still fire, so the
+       quick-bar buttons, the terminal-container custom scroll
+       handler, and the textarea all keep working. Inner scrollers
+       that need pan opt back in below (`#session-list` pan-y,
+       `#quick-bar` pan-x, `#text-input-bar textarea` auto). */
+    body { touch-action: none; }
+    html { touch-action: manipulation; }
     body {
       background: var(--bg);
       color: var(--fg);
@@ -135,9 +152,15 @@
       overflow-x: hidden;
       overflow-y: auto;
       overscroll-behavior: contain;
+      /* body's `touch-action: none` blocks default panning at the
+         document level — opt this scroller back in for vertical
+         touch-pan. */
+      touch-action: pan-y;
+      scrollbar-width: none;
       font-family: 'SF Mono', 'Menlo', 'Consolas', 'Monaco', monospace;
       font-size: 13px;
     }
+    #session-list::-webkit-scrollbar { display: none; }
     #session-list h1 {
       font-size: 11px;
       margin-bottom: 12px;
@@ -617,6 +640,13 @@
          invalidates the whole document on every renderer paint
          under certain GPU/canvas combinations. */
       contain: strict;
+      /* Our custom touch handler (main.ts) reads touchstart/move/end
+         directly and decides tap-vs-scroll itself; touch-action:none
+         tells iOS not to interpret these touches as a default scroll
+         gesture (it wouldn't scroll anyway — the container itself
+         has overflow:hidden — but iOS still tries, which leaks a
+         frame of motion). */
+      touch-action: none;
     }
 
     /* --- Mobile Keyboard --- */
@@ -628,6 +658,11 @@
       display: flex;
       overflow-x: auto;
       overscroll-behavior: contain;
+      /* Opt back into horizontal pan since body has touch-action:
+         none. The on-screen key strip is wider than the viewport
+         and the user needs to swipe horizontally to reach the
+         right-side keys (F-keys, Insert, etc.). */
+      touch-action: pan-x;
       padding: 4px 6px;
       gap: 4px;
       -webkit-overflow-scrolling: touch;
@@ -687,6 +722,11 @@
       max-height: calc(3em * 1.4 + 12px);
       overflow-y: auto;
       overscroll-behavior: contain;
+      /* `touch-action: manipulation` opts back in to default text-
+         input behaviors (insertion-cursor positioning, drag-select,
+         internal scroll on long content) while still suppressing
+         double-tap-zoom. */
+      touch-action: manipulation;
       /* Hide the inner scrollbar past the 3-line cap. The textarea
          is still scrollable internally; suppressing the visible
          scrollbar keeps the bottom bar visually quiet (matches the

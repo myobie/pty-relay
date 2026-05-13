@@ -2296,12 +2296,14 @@ textBackBtn.addEventListener("click", () => setKbMode("bar"));
 kbReopen.addEventListener("click", () => setKbMode("bar"));
 buildQuickBar();
 buildKeyPanel();
+var TAP_SLOP_PX = 10;
 var touchStartY = 0;
 var scrollPixelOffset = 0;
 var touchVelocity = 0;
 var lastTouchY = 0;
 var lastTouchTime = 0;
 var inertiaFrame = null;
+var gestureIsScroll = false;
 function getLineHeight() {
   if (term) {
     const canvas = terminalContainer.querySelector("canvas");
@@ -2331,6 +2333,7 @@ terminalContainer.addEventListener(
     lastTouchTime = Date.now();
     touchVelocity = 0;
     scrollPixelOffset = 0;
+    gestureIsScroll = false;
   },
   { passive: true }
 );
@@ -2338,6 +2341,13 @@ terminalContainer.addEventListener(
   "touchmove",
   (e) => {
     const y = e.touches[0].clientY;
+    if (!gestureIsScroll) {
+      if (Math.abs(y - touchStartY) < TAP_SLOP_PX) return;
+      gestureIsScroll = true;
+      e.preventDefault();
+    } else {
+      e.preventDefault();
+    }
     const dy = lastTouchY - y;
     scrollByPixels(dy);
     const now = Date.now();
@@ -2346,7 +2356,7 @@ terminalContainer.addEventListener(
     lastTouchY = y;
     lastTouchTime = now;
   },
-  { passive: true }
+  { passive: false }
 );
 terminalContainer.addEventListener(
   "touchend",

@@ -1678,6 +1678,32 @@ buildQuickBar();
 buildKeyPanel();
 
 // ── Touch scroll with inertia ──
+//
+// Distinguishes "tap" from "scroll" by movement distance. iOS only
+// fires a synthetic `click` event after a touch sequence where the
+// finger barely moved; the click cascades through xterm's helper
+// textarea focus, which pops the soft keyboard. Two-line cure:
+//
+//   1. While the finger is below TAP_SLOP_PX from touchstart, do
+//      nothing — treat the gesture as a possible tap. Synthetic
+//      click is allowed to fire (e.g. user really did mean to tap
+//      a link or focus the terminal).
+//   2. The moment the finger crosses TAP_SLOP_PX, lock the gesture
+//      into "scroll" mode: scrollByPixels for this and every
+//      subsequent move, AND call preventDefault on the touchmove.
+//      Calling preventDefault during a touch sequence on iOS
+//      suppresses the synthetic mouseup/click that would otherwise
+//      arrive on touchend. Result: scroll gestures don't focus the
+//      terminal. Tap gestures still do.
+//
+// touchmove must be `passive: false` for preventDefault to take
+// effect. We pay a small main-thread scheduling cost in exchange
+// for the gesture discrimination — worth it because the previous
+// `passive: true` configuration was firing a click on every
+// short-distance scroll, which on Codex/TUIs translated to keyboard-
+// popups-during-scrolling.
+
+const TAP_SLOP_PX = 10;
 
 let touchStartY = 0;
 let scrollPixelOffset = 0;
@@ -1685,6 +1711,7 @@ let touchVelocity = 0;
 let lastTouchY = 0;
 let lastTouchTime = 0;
 let inertiaFrame: number | null = null;
+let gestureIsScroll = false;
 
 function getLineHeight(): number {
   if (term) {
@@ -1717,6 +1744,7 @@ terminalContainer.addEventListener(
     lastTouchTime = Date.now();
     touchVelocity = 0;
     scrollPixelOffset = 0;
+    gestureIsScroll = false;
   },
   { passive: true }
 );
@@ -1724,6 +1752,20 @@ terminalContainer.addEventListener(
   "touchmove",
   (e: TouchEvent) => {
     const y = e.touches[0].clientY;
+    if (!gestureIsScroll) {
+      // Still in the tap-slop dead zone. If we've now exceeded the
+      // threshold, commit to scroll mode and suppress the synthetic
+      // click. Otherwise just observe — don't scroll, don't
+      // preventDefault (lets a real tap fire its click cleanly).
+      if (Math.abs(y - touchStartY) < TAP_SLOP_PX) return;
+      gestureIsScroll = true;
+      e.preventDefault();
+    } else {
+      // Already in scroll mode — keep preventing default so iOS
+      // doesn't try to scroll the (locked) document AND so we
+      // continue suppressing synthetic mouse events.
+      e.preventDefault();
+    }
     const dy = lastTouchY - y;
     scrollByPixels(dy);
     const now = Date.now();
@@ -1732,7 +1774,7 @@ terminalContainer.addEventListener(
     lastTouchY = y;
     lastTouchTime = now;
   },
-  { passive: true }
+  { passive: false }
 );
 terminalContainer.addEventListener(
   "touchend",
