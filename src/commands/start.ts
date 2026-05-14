@@ -621,14 +621,20 @@ async function setupTailscale(port: number, config: Config): Promise<string | nu
     console.error(`Tailscale serve error: ${err.message}`);
   });
 
-  // Clean up on exit
+  // Clean up on exit.
+  //
+  // Use the targeted `--https=443 off` form instead of `serve reset`:
+  // reset wipes EVERY serve entry on the tailnet node, including ones
+  // owned by other apps (e.g. coord-web on :8443). `tailscale serve
+  // <port>` is shorthand for "expose HTTPS on 443 -> localhost:<port>",
+  // so the matching cleanup is the HTTPS port, not the local port.
   process.on("exit", () => {
     tsServe.kill();
-    try { execSync(`"${cli}" serve reset`, { stdio: "ignore" }); } catch {}
+    try { execSync(`"${cli}" serve --https=443 off`, { stdio: "ignore" }); } catch {}
   });
   process.on("SIGINT", () => {
     tsServe.kill();
-    try { execSync(`"${cli}" serve reset`, { stdio: "ignore" }); } catch {}
+    try { execSync(`"${cli}" serve --https=443 off`, { stdio: "ignore" }); } catch {}
     process.exit(0);
   });
 
