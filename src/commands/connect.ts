@@ -86,9 +86,14 @@ export async function connect(
     process.env.PTY_RELAY_PASSPHRASE = passphrase;
   }
 
-  // Save this host for the interactive TUI (strip session from URL)
-  const baseUrl = createToken(parsed.host, parsed.publicKey, parsed.secret, undefined, parsed.clientToken ?? undefined);
-  await saveKnownHost(parsed.host, baseUrl, store);
+  // NOTE: known-host persistence used to fire here, before any network
+  // round-trip. That left bad entries on disk when the user pasted a
+  // typo'd token URL — and combined with the (now-fixed) full-URL dedup
+  // bug in saveKnownHost, those stale rows kept the original label and
+  // got resolved instead of newer, correct entries. We now persist only
+  // after the Noise NK handshake completes (see recordHostFromParsed
+  // calls from `onReady` in fetchSessions / attemptConnect), so we never
+  // record a host we haven't cryptographically confirmed.
 
   // If no session and no spawn, list sessions and re-exec with the chosen one
   if (!parsed.session && !options?.spawn) {
@@ -97,6 +102,31 @@ export async function connect(
   }
 
   attachSession(wsUrl, parsed, store, options);
+}
+
+/**
+ * Persist the host this `parsed` token points at. Composes a base URL
+ * (no session, current clientToken if any) and hands it to
+ * `saveKnownHost` — which dedups on host so re-saves overwrite in
+ * place. Fire-and-forget by design (matches the existing post-`approved`
+ * save behavior); errors are logged at the storage layer.
+ *
+ * Call ONLY after the Noise handshake completes. Pre-handshake saves
+ * persisted unverified URLs and were the source of the stale-entry
+ * class of bugs.
+ */
+export function recordHostFromParsed(
+  parsed: ReturnType<typeof parseToken>,
+  store: SecretStore
+): void {
+  const baseUrl = createToken(
+    parsed.host,
+    parsed.publicKey,
+    parsed.secret,
+    undefined,
+    parsed.clientToken ?? undefined,
+  );
+  saveKnownHost(parsed.host, baseUrl, store).catch(() => {});
 }
 
 function looksLikeTokenUrl(s: string): boolean {
@@ -168,6 +198,9 @@ function fetchSessions(
       daemonPublicKey: parsed.publicKey,
     }, {
       onReady: () => {
+        // Handshake done — daemon's pubkey verified by the NK pattern.
+        // Safe to persist the known-host entry now.
+        recordHostFromParsed(parsed, store);
         if (!process.env.PTY_RELAY_CLIENT_ANON) {
           connection.send(new TextEncoder().encode(JSON.stringify({
             type: "hello",
@@ -190,8 +223,7 @@ function fetchSessions(
               // Save the approved token for future reconnections AND
               // update parsed so the re-exec URL includes the token.
               parsed.clientToken = msg.client_token;
-              const newUrl = createToken(parsed.host, parsed.publicKey, parsed.secret, undefined, msg.client_token);
-              saveKnownHost(parsed.host, newUrl, store).catch(() => {});
+              recordHostFromParsed(parsed, store);
             } else if (msg.type === "error") {
               connection.close();
               reject(new Error(msg.message));
@@ -280,6 +312,10 @@ function attemptConnect(
       daemonPublicKey: parsed.publicKey,
     }, {
       onReady: () => {
+        // Handshake done — daemon's pubkey verified by the NK pattern.
+        // Safe to persist the known-host entry now. (See comment at the
+        // top of `connect` about why we don't save before this point.)
+        recordHostFromParsed(parsed, store);
         if (!process.env.PTY_RELAY_CLIENT_ANON) {
           connection.send(new TextEncoder().encode(JSON.stringify({
             type: "hello",
@@ -356,8 +392,8 @@ function attemptConnect(
             const msg = JSON.parse(new TextDecoder().decode(plaintext));
             if (msg.type === "approved" && msg.client_token) {
               // Save the approved token for future reconnections
-              const newUrl = createToken(parsed.host, parsed.publicKey, parsed.secret, undefined, msg.client_token);
-              saveKnownHost(parsed.host, newUrl, store).catch(() => {});
+              parsed.clientToken = msg.client_token;
+              recordHostFromParsed(parsed, store);
               return; // Don't pass to terminal
             }
           } catch {}
@@ -592,9 +628,11 @@ export async function connectEmbedded(
   const secretHash = computeSecretHash(parsed.secret);
   const wsUrl = getWebSocketUrl(parsed.host, "client", secretHash, undefined, parsed.clientToken ?? undefined);
 
-  // Save this host for the interactive TUI
-  const baseUrl = createToken(parsed.host, parsed.publicKey, parsed.secret, undefined, parsed.clientToken ?? undefined);
-  await saveKnownHost(parsed.host, baseUrl, options.store);
+  // Known-host persistence happens in attemptConnect's `onReady`
+  // callback below — after the Noise handshake confirms the daemon's
+  // identity. See the comment in `connect` for the bug class this
+  // closes (typo'd token URLs were ending up on disk before any
+  // network round-trip).
 
   const session = options.spawn || parsed.session!;
 

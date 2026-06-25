@@ -133,13 +133,24 @@ export function pickUniqueLabel(
   }
 }
 
+function urlHost(u: string): string | null {
+  try { return new URL(u).host; } catch { return null; }
+}
+
 /**
- * Save a self-hosted host. The URL is the unique key: repeated saves
- * of the same URL update the label in place. If the label collides
- * with a DIFFERENT host (different URL / different public-relay
- * entry), the new entry's label gets a URL-derived suffix so both
- * can coexist. This is a recent change — previously a label collision
- * silently evicted the older entry.
+ * Save a self-hosted host. The HOST (URL origin) is the unique key:
+ * repeated saves for the same host — even with a rotated `#pk.secret`
+ * fragment — update the entry in place. This matters when the remote
+ * daemon's state is wiped and it comes back up with fresh key material:
+ * connecting with the new token URL should overwrite the stale entry,
+ * not append a second one. If the label collides with a DIFFERENT host
+ * (different URL host / different public-relay entry), the new entry's
+ * label gets a URL-derived suffix so both can coexist.
+ *
+ * The old behavior dedup'd on the full URL including the fragment,
+ * which meant any pubkey/secret rotation left a stale entry alongside
+ * the new one — and worse, the stale entry kept the original label,
+ * so `connect <label>` would resolve to the stale row.
  */
 export async function saveKnownHost(
   label: string,
@@ -147,10 +158,17 @@ export async function saveKnownHost(
   store: SecretStore
 ): Promise<void> {
   const existing = await loadKnownHosts(store);
-  // Drop any prior entry for this URL (updating its label); keep
-  // entries with the SAME label but a different URL so we can resolve
-  // the collision below.
-  const kept = existing.filter((h) => h.url !== url);
+  const incomingHost = urlHost(url);
+  // Drop any prior self-hosted entry for the same host (this is the
+  // identity key — same daemon, possibly rotated key material). Keep
+  // public-relay entries (no url) and any entries whose stored url is
+  // malformed (defensive — we can't decide what host they belong to).
+  const kept = existing.filter((h) => {
+    if (h.url == null) return true;
+    const existingHost = urlHost(h.url);
+    if (existingHost == null) return true;
+    return existingHost !== incomingHost;
+  });
   const usedLabels = new Set(kept.map((h) => h.label));
   const finalLabel = pickUniqueLabel(label, url, usedLabels);
   kept.push({ label: finalLabel, url });
