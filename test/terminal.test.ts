@@ -1,19 +1,16 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { Buffer } from "node:buffer";
-import { Terminal } from "../src/terminal/terminal.ts";
-import type { ClientRelayConnection } from "../src/terminal/client-connection.ts";
+import { Terminal, type TerminalConnection } from "../src/terminal/terminal.ts";
 import {
   MessageType,
   encodePacket,
 } from "../../pty/src/protocol.ts";
 
-function createMockConnection(): ClientRelayConnection {
+function createMockConnection(): TerminalConnection {
   return {
-    send: vi.fn(),
-    connect: vi.fn(),
-    close: vi.fn(),
-    isReady: vi.fn().mockReturnValue(true),
-  } as unknown as ClientRelayConnection;
+    sendApp: vi.fn(),
+    sendBridgeData: vi.fn(),
+  };
 }
 
 function makeExitPacket(exitCode: number): Uint8Array {
@@ -22,12 +19,12 @@ function makeExitPacket(exitCode: number): Uint8Array {
   return new Uint8Array(encodePacket(MessageType.EXIT, payload));
 }
 
-function makeAttachedMessage(): Uint8Array {
-  return new TextEncoder().encode(JSON.stringify({ type: "attached" }));
+function feedAttached(t: Terminal): void {
+  t.handleAppMessage("attached", { type: "attached" });
 }
 
-function makeErrorMessage(message: string): Uint8Array {
-  return new TextEncoder().encode(JSON.stringify({ type: "error", message }));
+function feedError(t: Terminal, message: string): void {
+  t.handleAppMessage("error", { type: "error", message });
 }
 
 // Suppress terminal escape sequences written to stdout during tests
@@ -58,7 +55,7 @@ describe("Terminal callbacks", () => {
     });
 
     // First, put terminal in "attached" state so detach makes sense
-    terminal.handleMessage(makeAttachedMessage());
+    feedAttached(terminal);
 
     // Simulate Ctrl+\ by feeding the detach byte via handleMessage
     // Actually, detach is triggered by stdin, so we call it indirectly.
@@ -87,10 +84,10 @@ describe("Terminal callbacks", () => {
     });
 
     // Put terminal in attached state
-    terminal.handleMessage(makeAttachedMessage());
+    feedAttached(terminal);
 
     // Feed an EXIT packet
-    terminal.handleMessage(makeExitPacket(0));
+    terminal.handlePtyBytes(makeExitPacket(0));
 
     expect(onExit).toHaveBeenCalledOnce();
     expect(onExit).toHaveBeenCalledWith(0);
@@ -114,8 +111,8 @@ describe("Terminal callbacks", () => {
       onExit,
     });
 
-    terminal.handleMessage(makeAttachedMessage());
-    terminal.handleMessage(makeExitPacket(42));
+    feedAttached(terminal);
+    terminal.handlePtyBytes(makeExitPacket(42));
 
     expect(onExit).toHaveBeenCalledOnce();
     expect(onExit).toHaveBeenCalledWith(42);
@@ -140,7 +137,7 @@ describe("Terminal callbacks", () => {
     });
 
     // Feed an error message (before attached state)
-    terminal.handleMessage(makeErrorMessage("session not found"));
+    feedError(terminal, "session not found");
 
     expect(onError).toHaveBeenCalledOnce();
     expect(onError).toHaveBeenCalledWith("session not found");
@@ -160,8 +157,8 @@ describe("Terminal callbacks", () => {
       rows: 24,
     });
 
-    terminal.handleMessage(makeAttachedMessage());
-    terminal.handleMessage(makeExitPacket(0));
+    feedAttached(terminal);
+    terminal.handlePtyBytes(makeExitPacket(0));
 
     expect(exitSpy).toHaveBeenCalledWith(0);
 
@@ -181,7 +178,7 @@ describe("Terminal callbacks", () => {
       rows: 24,
     });
 
-    terminal.handleMessage(makeErrorMessage("something broke"));
+    feedError(terminal, "something broke");
 
     expect(exitSpy).toHaveBeenCalledWith(1);
 

@@ -4,6 +4,61 @@ import { FitAddon } from "@xterm/addon-fit";
 import { WebglAddon } from "@xterm/addon-webgl";
 import sodium from "libsodium-wrappers-sumo";
 
+// src/relay/channel-framing.ts
+var MIN_FRAME_BYTES = 5;
+var MAX_FRAME_BYTES = 65536;
+var CONTROL_CHANNEL_ID = 0;
+var DEFAULT_PTY_CHANNEL_ID = 1;
+var FRAME_TYPE = {
+  /** Stdio / pty-packet payload. The common case. */
+  DATA: 0,
+  /**
+   * Exec-mode only: client → daemon ASCII signal name in payload
+   * (e.g. "SIGINT", "SIGTERM"). Other modes treat this as a protocol
+   * error on their channel.
+   */
+  SIGNAL: 1
+};
+function encodeFrame(channelId, type, payload) {
+  if (!Number.isInteger(channelId) || channelId < 0 || channelId > 4294967295) {
+    throw new RangeError(
+      `channel id must be a uint32 (got ${channelId})`
+    );
+  }
+  if (!Number.isInteger(type) || type < 0 || type > 255) {
+    throw new RangeError(`type must be a uint8 (got ${type})`);
+  }
+  const total = MIN_FRAME_BYTES + payload.length;
+  if (total > MAX_FRAME_BYTES) {
+    throw new RangeError(
+      `frame would be ${total} bytes; max is ${MAX_FRAME_BYTES}`
+    );
+  }
+  const buf = new Uint8Array(total);
+  const view = new DataView(buf.buffer);
+  view.setUint32(0, channelId, false);
+  buf[4] = type;
+  if (payload.length > 0) buf.set(payload, MIN_FRAME_BYTES);
+  return buf;
+}
+function decodeFrame(bytes) {
+  if (bytes.length < MIN_FRAME_BYTES) {
+    return { ok: false, code: "frame_too_short" };
+  }
+  if (bytes.length > MAX_FRAME_BYTES) {
+    return { ok: false, code: "frame_too_large" };
+  }
+  const view = new DataView(
+    bytes.buffer,
+    bytes.byteOffset,
+    bytes.byteLength
+  );
+  const channelId = view.getUint32(0, false);
+  const type = bytes[4];
+  const payload = bytes.slice(MIN_FRAME_BYTES);
+  return { ok: true, frame: { channelId, type, payload } };
+}
+
 // ../pty/src/tui/fuzzy.ts
 function fuzzyMatch(query, target) {
   if (query.length === 0) return { match: true, score: 1 };
@@ -1707,10 +1762,11 @@ function sendEncrypted(data) {
   ws.send(ct);
 }
 function sendJson(obj) {
-  sendEncrypted(new TextEncoder().encode(JSON.stringify(obj)));
+  const payload = new TextEncoder().encode(JSON.stringify(obj));
+  sendEncrypted(encodeFrame(CONTROL_CHANNEL_ID, FRAME_TYPE.DATA, payload));
 }
 function sendPtyPacket(packet) {
-  sendEncrypted(packet);
+  sendEncrypted(encodeFrame(DEFAULT_PTY_CHANNEL_ID, FRAME_TYPE.DATA, packet));
 }
 function disconnect() {
   intentionalDisconnect = true;
@@ -1787,7 +1843,23 @@ function attachToSession(sessionName, _cols, _rows) {
     rows: term.rows
   });
 }
-function handleDecryptedMessage(plaintext) {
+function handleDecryptedMessage(rawPlaintext) {
+  const decoded = decodeFrame(rawPlaintext);
+  if (!decoded.ok) {
+    showStatus(`Protocol error: ${decoded.code}`);
+    return;
+  }
+  const { channelId, payload: plaintext } = decoded.frame;
+  if (channelId === CONTROL_CHANNEL_ID) {
+    handleAppFrame(plaintext);
+    return;
+  }
+  if (channelId === DEFAULT_PTY_CHANNEL_ID) {
+    handlePtyFrame(plaintext);
+    return;
+  }
+}
+function handleAppFrame(plaintext) {
   if (!sessionAttached) {
     try {
       const msg = JSON.parse(new TextDecoder().decode(plaintext));
@@ -1847,6 +1919,14 @@ function handleDecryptedMessage(plaintext) {
     } catch {
     }
   }
+  try {
+    const msg = JSON.parse(new TextDecoder().decode(plaintext));
+    if (msg.type === "sessions") renderSessionList(msg.sessions);
+    else if (msg.type === "error") showStatus(`Error: ${msg.message}`);
+  } catch {
+  }
+}
+function handlePtyFrame(plaintext) {
   const packets = packetParser.feed(plaintext);
   for (const pkt of packets) {
     switch (pkt.type) {

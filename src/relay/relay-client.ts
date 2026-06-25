@@ -18,6 +18,12 @@ import {
 } from "../crypto/key-conversion.ts";
 import { buildPublicClientPairUrl } from "./public-server-url.ts";
 import { formatUpgradeRejection } from "./relay-connection.ts";
+import {
+  encodeFrame,
+  decodeFrame,
+  CONTROL_CHANNEL_ID,
+  FRAME_TYPE,
+} from "./channel-framing.ts";
 import { log, now, sinceMs, redactAuthQuery } from "../log.ts";
 
 export interface RemoteSession {
@@ -276,9 +282,12 @@ function sendOverTunnel<TResponse>(
             return;
           }
 
-          // Send the request now that the transport is open.
-          const payload = JSON.stringify(request);
-          const ct = transport.encrypt(new TextEncoder().encode(payload));
+          // Send the request now that the transport is open. v2: wrap
+          // the JSON in a channel-0 DATA frame so the daemon's
+          // ChannelDispatcher routes it to onAppMessage.
+          const jsonBytes = new TextEncoder().encode(JSON.stringify(request));
+          const framed = encodeFrame(CONTROL_CHANNEL_ID, FRAME_TYPE.DATA, jsonBytes);
+          const ct = transport.encrypt(framed);
           log("ws-oneshot", "encrypted request sent", {
             requestType: request.type,
             bytes: ct.length,
@@ -298,8 +307,16 @@ function sendOverTunnel<TResponse>(
             reject(new Error(`decrypt failed: ${err?.message ?? err}`));
             return;
           }
+          // v2: peel off the channel frame. One-shot RPC traffic lives
+          // on channel 0; any other channel is ignored (a future exec
+          // channel sharing the same socket would be unusual here).
+          const decoded = decodeFrame(plaintext);
+          if (!decoded.ok || decoded.frame.channelId !== CONTROL_CHANNEL_ID) {
+            return;
+          }
+          const innerPayload = decoded.frame.payload;
           try {
-            const msg = JSON.parse(new TextDecoder().decode(plaintext));
+            const msg = JSON.parse(new TextDecoder().decode(innerPayload));
             log("ws-oneshot", "encrypted response recv", {
               type: msg.type,
               bytes: data.length,

@@ -265,13 +265,14 @@ describe("parseControlMessage — keepalive / error / unknown", () => {
     expect(r.msg).toEqual({ type: "keepalive" });
   });
 
-  it("parses a connection-level error", () => {
+  it("routes `error` through onAppMessage (the v1 RPC vocabulary uses {type:'error',message} without a code field)", () => {
     const r = parseControlMessage(
-      bytesFromJson({ type: "error", code: "frame_too_large", message: "oops" })
+      bytesFromJson({ type: "error", message: "session not found" }),
     );
     expect(r.ok).toBe(true);
-    if (!r.ok || r.kind !== "control" || r.msg.type !== "error") return;
-    expect(r.msg.code).toBe("frame_too_large");
+    if (!r.ok || r.kind !== "app") return;
+    expect(r.type).toBe("error");
+    expect(r.json).toEqual({ type: "error", message: "session not found" });
   });
 
   it("returns an `app` envelope for unrecognized types (v1 session RPC passthrough)", () => {
@@ -370,7 +371,6 @@ describe("encodeControlMessage round-trip", () => {
       { type: "channel_exit", id: 6, exit_code: 0, signal: null },
       { type: "channel_exit", id: 7, exit_code: null, signal: "SIGTERM" },
       { type: "keepalive" },
-      { type: "error", code: "frame_too_large", message: "oops" },
     ];
     for (const msg of cases) {
       const bytes = encodeControlMessage(msg);

@@ -11,6 +11,7 @@ import {
 import type { ParsedToken } from "../crypto/index.ts";
 import { ClientRelayConnection } from "../terminal/client-connection.ts";
 import { Terminal } from "../terminal/terminal.ts";
+import { ChannelConnection } from "../relay/channel-connection.ts";
 import { saveKnownHost } from "../relay/known-hosts.ts";
 import type { SecretStore } from "../storage/secret-store.ts";
 import { openSecretStore } from "../storage/bootstrap.ts";
@@ -193,6 +194,8 @@ function fetchSessions(
       reject(new Error("Timed out waiting for session list"));
     }, 15000);
 
+    let channel: ChannelConnection | null = null;
+
     const connection = new ClientRelayConnection(wsUrl, {
       pattern: NK,
       daemonPublicKey: parsed.publicKey,
@@ -202,34 +205,17 @@ function fetchSessions(
         // Safe to persist the known-host entry now.
         recordHostFromParsed(parsed, store);
         if (!process.env.PTY_RELAY_CLIENT_ANON) {
-          connection.send(new TextEncoder().encode(JSON.stringify({
+          channel?.sendApp({
             type: "hello",
             client: "cli",
             os: process.platform,
             label: os.hostname(),
-          })));
+          });
         }
-        connection.send(new TextEncoder().encode(JSON.stringify({ type: "list" })));
+        channel?.sendApp({ type: "list" });
       },
       onEncryptedMessage: (plaintext: Uint8Array) => {
-        if (plaintext.length > 0 && plaintext[0] === 0x7b) {
-          try {
-            const msg = JSON.parse(new TextDecoder().decode(plaintext));
-            if (msg.type === "sessions") {
-              clearTimeout(timeout);
-              connection.close();
-              resolve(msg.sessions);
-            } else if (msg.type === "approved" && msg.client_token) {
-              // Save the approved token for future reconnections AND
-              // update parsed so the re-exec URL includes the token.
-              parsed.clientToken = msg.client_token;
-              recordHostFromParsed(parsed, store);
-            } else if (msg.type === "error") {
-              connection.close();
-              reject(new Error(msg.message));
-            }
-          } catch {}
-        }
+        channel?.handlePlaintext(plaintext);
       },
       onWaitingForApproval: () => {
         console.log("Waiting for operator approval...");
@@ -238,6 +224,32 @@ function fetchSessions(
       onError: (err: Error) => { reject(err); },
       onClose: () => {},
     });
+
+    channel = new ChannelConnection(
+      (frame) => connection.send(frame),
+      {
+        onApp: (_type, json) => {
+          if (json.type === "sessions") {
+            clearTimeout(timeout);
+            connection.close();
+            resolve((json.sessions as Array<{ name: string; command?: string }>) ?? []);
+          } else if (json.type === "approved" && typeof json.client_token === "string") {
+            // Save the approved token for future reconnections AND
+            // update parsed so the re-exec URL includes the token.
+            parsed.clientToken = json.client_token;
+            recordHostFromParsed(parsed, store);
+          } else if (json.type === "error") {
+            connection.close();
+            reject(new Error(typeof json.message === "string" ? json.message : "daemon error"));
+          }
+        },
+        onControl: () => {},
+        onFatal: (code, message) => {
+          connection.close();
+          reject(new Error(`protocol ${code}: ${message}`));
+        },
+      },
+    );
     connection.connect();
   });
 }
@@ -296,6 +308,7 @@ function attemptConnect(
     let approvalTimeout: ReturnType<typeof setTimeout> | null = null;
     // Track whether disconnect was caused by us (intentional close)
     let intentionalClose = false;
+    let channel: ChannelConnection | null = null;
 
     function done(reason: DisconnectReason): void {
       if (resolved) return;
@@ -317,88 +330,65 @@ function attemptConnect(
         // top of `connect` about why we don't save before this point.)
         recordHostFromParsed(parsed, store);
         if (!process.env.PTY_RELAY_CLIENT_ANON) {
-          connection.send(new TextEncoder().encode(JSON.stringify({
+          channel?.sendApp({
             type: "hello",
             client: "cli",
             os: process.platform,
             label: os.hostname(),
-          })));
+          });
         }
+
+        const terminalOptions = {
+          connection: channel!,
+          session,
+          cols,
+          rows,
+          onDetach: () => {
+            intentionalClose = true;
+            try { connection.close(); } catch {}
+            done({ kind: "detached" });
+          },
+          onExit: () => {
+            intentionalClose = true;
+            try { connection.close(); } catch {}
+            done({ kind: "exited" });
+          },
+          onError: (msg: string) => {
+            intentionalClose = true;
+            try { connection.close(); } catch {}
+            done({ kind: "error", message: msg });
+          },
+        };
 
         if (options.spawn && !options.isReconnect) {
           // Only spawn on first connect — on reconnect we always attach
-          connection.send(new TextEncoder().encode(JSON.stringify({
+          channel?.sendApp({
             type: "spawn",
             name: options.spawn,
             cols,
             rows,
             ...(options.cwd ? { cwd: options.cwd } : {}),
             ...(options.tags && Object.keys(options.tags).length > 0 ? { tags: options.tags } : {}),
-          })));
-          terminal = new Terminal({
-            connection,
-            session,
-            cols,
-            rows,
-            skipAttach: true,
-            onDetach: () => {
-              intentionalClose = true;
-              try { connection.close(); } catch {}
-              done({ kind: "detached" });
-            },
-            onExit: () => {
-              intentionalClose = true;
-              try { connection.close(); } catch {}
-              done({ kind: "exited" });
-            },
-            onError: (msg) => {
-              intentionalClose = true;
-              try { connection.close(); } catch {}
-              done({ kind: "error", message: msg });
-            },
           });
-          terminal.start(cols, rows);
+          terminal = new Terminal({ ...terminalOptions, skipAttach: true });
         } else {
           // Attach to existing session (also used on reconnect)
-          terminal = new Terminal({
-            connection,
-            session,
-            cols,
-            rows,
-            onDetach: () => {
-              intentionalClose = true;
-              try { connection.close(); } catch {}
-              done({ kind: "detached" });
-            },
-            onExit: () => {
-              intentionalClose = true;
-              try { connection.close(); } catch {}
-              done({ kind: "exited" });
-            },
-            onError: (msg) => {
-              intentionalClose = true;
-              try { connection.close(); } catch {}
-              done({ kind: "error", message: msg });
-            },
-          });
-          terminal.start(cols, rows);
+          terminal = new Terminal(terminalOptions);
         }
+
+        // Route inbound pty packets (channel-DEFAULT_PTY_CHANNEL_ID
+        // frames) to the terminal.
+        channel?.attachBridge({
+          mode: "pty",
+          onFrame: (_type, payload) => terminal?.handlePtyBytes(payload),
+          close: () => {},
+        });
+
+        terminal.start(cols, rows);
       },
 
       onEncryptedMessage: (plaintext: Uint8Array) => {
-        // Check for control messages before passing to terminal
-        if (plaintext.length > 0 && plaintext[0] === 0x7b) {
-          try {
-            const msg = JSON.parse(new TextDecoder().decode(plaintext));
-            if (msg.type === "approved" && msg.client_token) {
-              // Save the approved token for future reconnections
-              parsed.clientToken = msg.client_token;
-              recordHostFromParsed(parsed, store);
-              return; // Don't pass to terminal
-            }
-          } catch {}
-        }
-        if (terminal) terminal.handleMessage(plaintext);
+        channel?.handlePlaintext(plaintext);
       },
 
       onWaitingForApproval: () => {
@@ -449,6 +439,27 @@ function attemptConnect(
         }
       },
     });
+
+    channel = new ChannelConnection(
+      (frame) => connection.send(frame),
+      {
+        onApp: (type, json) => {
+          if (type === "approved" && typeof json.client_token === "string") {
+            parsed.clientToken = json.client_token;
+            recordHostFromParsed(parsed, store);
+            return;
+          }
+          // attached / spawned / error
+          terminal?.handleAppMessage(type, json);
+        },
+        onControl: () => {},
+        onFatal: (code, message) => {
+          intentionalClose = true;
+          try { connection.close(); } catch {}
+          done({ kind: "error", message: `protocol ${code}: ${message}` });
+        },
+      },
+    );
 
     connection.connect();
   });

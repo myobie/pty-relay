@@ -34,13 +34,16 @@ export class SessionBridge implements ChannelHandler {
 
   private socket: net.Socket | null = null;
   private sessionName: string | null = null;
+  private readonly sendData: (payload: Uint8Array) => void;
 
   /**
    * @param sendData  Wrap bytes in this channel's frame (caller closes
    *                  over `channelId`) and ship via the Noise transport.
    *                  Called whenever the pty socket has bytes to forward.
    */
-  constructor(private readonly sendData: (payload: Uint8Array) => void) {}
+  constructor(sendData: (payload: Uint8Array) => void) {
+    this.sendData = sendData;
+  }
 
   /**
    * Connect to the pty session's local Unix socket and send the

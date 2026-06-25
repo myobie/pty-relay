@@ -171,8 +171,14 @@ export function parseControlMessage(payload: Uint8Array): ParseResult {
       return wrapControl(parseChannelExit(o));
     case "keepalive":
       return { ok: true, kind: "control", msg: { type: "keepalive" } };
-    case "error":
-      return wrapControl(parseConnectionError(o));
+    // `error` is intentionally NOT a channel-lifecycle type here — the
+    // v1 session vocabulary uses `{type:"error", message:"..."}` for
+    // application-level errors (no `code` field), and we route those
+    // through onAppMessage unchanged. The dispatcher's own
+    // connection-fatal `error` frames (with a typed `code`) are
+    // followed by a WS close, so peers don't need to discriminate
+    // them at the channel-lifecycle layer — the `code` field is the
+    // discriminator and lives in the app message.
     default:
       return { ok: true, kind: "app", type: o.type, json: o };
   }

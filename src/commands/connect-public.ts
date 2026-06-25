@@ -3,6 +3,7 @@ import sodium from "libsodium-wrappers-sumo";
 import { ready, KK, Transport } from "../crypto/index.ts";
 import { ClientRelayConnection } from "../terminal/client-connection.ts";
 import { Terminal } from "../terminal/terminal.ts";
+import { ChannelConnection } from "../relay/channel-connection.ts";
 import type { SecretStore } from "../storage/secret-store.ts";
 import { openSecretStore } from "../storage/bootstrap.ts";
 import { resolveHost } from "../relay/host-resolve.ts";
@@ -182,6 +183,7 @@ async function attemptConnectPublic(
     let settled = false;
     let terminal: Terminal | null = null;
     let intentionalClose = false;
+    let channel: ChannelConnection | null = null;
 
     function done(reason: PublicDisconnectReason) {
       if (settled) return;
@@ -196,19 +198,15 @@ async function attemptConnectPublic(
     }, {
       onReady: () => {
         if (!process.env.PTY_RELAY_CLIENT_ANON) {
-          connection.send(
-            new TextEncoder().encode(
-              JSON.stringify({
-                type: "hello",
-                client: "cli",
-                os: process.platform,
-                label: os.hostname(),
-              })
-            )
-          );
+          channel?.sendApp({
+            type: "hello",
+            client: "cli",
+            os: process.platform,
+            label: os.hostname(),
+          });
         }
         terminal = new Terminal({
-          connection,
+          connection: channel!,
           session,
           cols,
           rows,
@@ -228,11 +226,16 @@ async function attemptConnectPublic(
             done({ kind: "error", message: msg });
           },
         });
+        channel?.attachBridge({
+          mode: "pty",
+          onFrame: (_type, payload) => terminal?.handlePtyBytes(payload),
+          close: () => {},
+        });
         terminal.start(cols, rows);
       },
 
       onEncryptedMessage: (plaintext: Uint8Array) => {
-        if (terminal) terminal.handleMessage(plaintext);
+        channel?.handlePlaintext(plaintext);
       },
 
       // Public-mode never waits for approval — Ed25519 is the gate.
@@ -271,6 +274,23 @@ async function attemptConnectPublic(
         }
       },
     });
+
+    channel = new ChannelConnection(
+      (frame) => connection.send(frame),
+      {
+        onApp: (type, json) => {
+          // attached / spawned / error — public mode has no
+          // "approved" handshake; client_pair pairing already gated it.
+          terminal?.handleAppMessage(type, json);
+        },
+        onControl: () => {},
+        onFatal: (code, message) => {
+          intentionalClose = true;
+          try { connection.close(); } catch {}
+          done({ kind: "error", message: `protocol ${code}: ${message}` });
+        },
+      },
+    );
 
     connection.connect();
   });

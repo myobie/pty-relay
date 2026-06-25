@@ -15,6 +15,7 @@ import {
   REVOKED_CLOSE_CODE,
 } from "../../relay/primary-connection.ts";
 import { RelayConnection } from "../../relay/relay-connection.ts";
+import { ChannelConnection } from "../../relay/channel-connection.ts";
 import { SessionBridge } from "../../relay/session-bridge.ts";
 import { ClientTracker } from "../../relay/client-tracker.ts";
 import {
@@ -41,7 +42,10 @@ import {
 const MAX_CLIENTS = 10;
 
 interface ClientSession {
-  connection: RelayConnection;
+  /** Raw Noise transport; lifecycle-only. */
+  rawConnection: RelayConnection;
+  /** Channel-mux wrapper around `rawConnection`. */
+  connection: ChannelConnection;
   bridge: SessionBridge | null;
   tracker: ClientTracker;
   eventsFollower?: EventFollower;
@@ -148,7 +152,8 @@ export async function startCommand(
     const cs = clients.get(clientId);
     if (!cs) return;
     teardownSharedClient(cs);
-    cs.connection.close();
+    cs.connection.closeAll("peer_lost");
+    cs.rawConnection.close();
     clients.delete(clientId);
     log("bridge", "per-client torn down", { clientId, remaining: clients.size });
     console.log(`Client ${clientId} disconnected. (${clients.size} active)`);
@@ -160,7 +165,9 @@ export async function startCommand(
     const urlFactory = () =>
       buildPublicDaemonUrl(state.relayUrl, state.accountKeys, { clientId });
 
-    const connection = new RelayConnection(urlFactory, state.sessionConfig, {
+    let channel: ChannelConnection | null = null;
+
+    const rawConnection = new RelayConnection(urlFactory, state.sessionConfig, {
       onPaired: (meta) => {
         console.log(
           `Client ${clientId} paired.${meta.pairing_hash_id ? ` (enrollment for preauth ${meta.pairing_hash_id.slice(0, 8)})` : ""}`
@@ -175,26 +182,9 @@ export async function startCommand(
         // handshake is the gate.
       },
       onEncryptedMessage: (plaintext: Uint8Array) => {
-        const cs = clients.get(clientId);
-        if (!cs) return;
-        if (
-          handleControlMessage(
-            clientId,
-            cs,
-            tracker,
-            plaintext,
-            state.accountKeys.secret,
-            state.accountId,
-            options
-          )
-        ) {
-          return;
-        }
-        if (cs.bridge?.isConnected()) {
-          // Phase 3 still ships v1 wire under the new ChannelHandler
-          // entry-point name; phase 4 wraps the bytes in channel frames.
-          cs.bridge.onFrame(0, plaintext);
-        }
+        // Channel-mux dispatcher routes channel-0 app messages to onApp
+        // (below) and DEFAULT_PTY_CHANNEL_ID frames to the bridge.
+        channel?.handlePlaintext(plaintext);
       },
       onPeerDisconnected: () => {
         teardownClient(clientId);
@@ -211,12 +201,37 @@ export async function startCommand(
       },
     });
 
+    channel = new ChannelConnection(
+      (frame) => rawConnection.send(frame),
+      {
+        onApp: (_type, json) => {
+          const cs = clients.get(clientId);
+          if (!cs) return;
+          handleControlMessage(
+            clientId,
+            cs,
+            tracker,
+            json,
+            state.accountKeys.secret,
+            state.accountId,
+            options
+          );
+        },
+        onControl: () => {},
+        onFatal: (code, message) => {
+          console.error(`Client ${clientId} protocol error: ${code} ${message}`);
+          teardownClient(clientId);
+        },
+      },
+    );
+
     clients.set(clientId, {
-      connection,
+      rawConnection,
+      connection: channel,
       bridge: null,
       tracker,
     });
-    connection.connect();
+    rawConnection.connect();
   }
 
   const primaryUrlFactory = () =>
@@ -311,22 +326,15 @@ function handleControlMessage(
   clientId: string,
   cs: ClientSession,
   tracker: ClientTracker,
-  plaintext: Uint8Array,
+  msg: Record<string, unknown>,
   minterSecretKey: Uint8Array,
   accountId: string,
   options: StartOptions
 ): boolean {
-  if (plaintext.length === 0 || plaintext[0] !== 0x7b) return false;
-  let msg: Record<string, unknown>;
-  try {
-    msg = JSON.parse(new TextDecoder().decode(plaintext));
-  } catch {
-    return false;
-  }
   const type = msg.type;
   const reply = (payload: Record<string, unknown>) => {
     try {
-      cs.connection.send(new TextEncoder().encode(JSON.stringify(payload)));
+      cs.connection.sendApp(payload);
     } catch {
       // Connection torn down; nothing to do.
     }

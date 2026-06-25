@@ -64,11 +64,19 @@ export interface DispatcherEvents {
 }
 
 export class ChannelDispatcher {
+  private readonly registry: ChannelRegistry;
+  private readonly send: SendFrame;
+  private readonly events: DispatcherEvents;
+
   constructor(
-    private readonly registry: ChannelRegistry,
-    private readonly send: SendFrame,
-    private readonly events: DispatcherEvents,
-  ) {}
+    registry: ChannelRegistry,
+    send: SendFrame,
+    events: DispatcherEvents,
+  ) {
+    this.registry = registry;
+    this.send = send;
+    this.events = events;
+  }
 
   /**
    * Called once per decrypted Noise plaintext. Returns nothing; side
