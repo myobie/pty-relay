@@ -12,3 +12,7 @@ pty.toml
 .overview-shots/
 .overview-shot.mjs
 .resize-probe.mjs
+repro.mjs
+
+# Per-clone MCP config used by coord-mode agents
+.mcp.json
