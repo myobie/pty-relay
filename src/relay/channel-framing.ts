@@ -29,6 +29,15 @@ export const MAX_FRAME_BYTES = 65_536;
 /** Channel 0 is reserved for JSON connection control messages. */
 export const CONTROL_CHANNEL_ID = 0;
 
+/**
+ * The single, implicit pty bridge channel id used through the phase-3
+ * port. Phase 4 introduces `channel_open` so callers can allocate
+ * channel ids freely (including multiple pty channels per connection);
+ * until then, every connection has at most one pty channel and it's
+ * here.
+ */
+export const DEFAULT_PTY_CHANNEL_ID = 1;
+
 /** Per-frame `type` byte values. */
 export const FRAME_TYPE = {
   /** Stdio / pty-packet payload. The common case. */

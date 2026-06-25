@@ -191,7 +191,9 @@ export async function startCommand(
           return;
         }
         if (cs.bridge?.isConnected()) {
-          cs.bridge.handleRelayData(plaintext);
+          // Phase 3 still ships v1 wire under the new ChannelHandler
+          // entry-point name; phase 4 wraps the bytes in channel frames.
+          cs.bridge.onFrame(0, plaintext);
         }
       },
       onPeerDisconnected: () => {

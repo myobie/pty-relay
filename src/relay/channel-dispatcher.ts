@@ -34,11 +34,24 @@ export type SendFrame = (frame: Uint8Array) => void;
 
 export interface DispatcherEvents {
   /**
-   * A well-formed control message arrived on channel 0. The application
-   * decides what to do (open a bridge, ack, error, etc.). The dispatcher
-   * itself only handles malformed frames + per-channel routing.
+   * A well-formed channel-lifecycle control message arrived on channel 0
+   * (channel_open / _ack / _error / _close / channel_exit / keepalive /
+   * error). The application reacts (open a bridge, ack, route exits) —
+   * the dispatcher itself just routes.
    */
   onControlMessage: (msg: ControlMessage) => void;
+  /**
+   * A well-formed JSON object arrived on channel 0 with a `type` that
+   * isn't one of the channel-lifecycle messages. These are the v1
+   * session-level RPCs (hello / list / peek / send / tag / events_* /
+   * spawn / approved / latency_report / mint_request) flowing through
+   * the new framing layer unchanged. The application's existing
+   * dispatcher (handleSessionControlMessage et al.) consumes the raw
+   * object.
+   *
+   * `type` is provided as a convenience; it is also `json.type`.
+   */
+  onAppMessage: (type: string, json: Record<string, unknown>) => void;
   /**
    * Connection-fatal error — frame too short/long, channel-0 with the
    * wrong frame type, garbage JSON on channel 0. The application sends
@@ -106,7 +119,21 @@ export class ChannelDispatcher {
       );
       return;
     }
-    this.events.onControlMessage(parsed.msg);
+    if (parsed.kind === "control") {
+      this.events.onControlMessage(parsed.msg);
+    } else {
+      this.events.onAppMessage(parsed.type, parsed.json);
+    }
+  }
+
+  /**
+   * Convenience: encode + ship an application-level JSON message on
+   * channel 0. Used for the v1 session-level RPCs (hello / list /
+   * approved / …) that flow through the new framing layer unchanged.
+   */
+  sendApp(msg: Record<string, unknown>): void {
+    const payload = new TextEncoder().encode(JSON.stringify(msg));
+    this.send(encodeFrame(CONTROL_CHANNEL_ID, FRAME_TYPE.DATA, payload));
   }
 
   /** Convenience: encode + ship a control message on channel 0. */

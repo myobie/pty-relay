@@ -90,7 +90,7 @@ export function handleSessionControlMessage(
   });
 
   if (type === "list") {
-    if (cs.bridge?.isConnected()) cs.bridge.close();
+    if (cs.bridge?.isConnected()) cs.bridge.close("client_detach");
     listSessions().then((sessions) => {
       reply({
         type: "sessions",
@@ -119,11 +119,13 @@ export function handleSessionControlMessage(
       replyError("invalid session name");
       return true;
     }
-    if (cs.bridge?.isConnected()) cs.bridge.close();
-    // The SessionBridge constructor expects the real RelayConnection type.
-    // SharedClientSession's `connection` is typed loosely here so both
-    // daemons can plug in compatible objects; cast at construction time.
-    cs.bridge = new SessionBridge(cs.connection as any);
+    if (cs.bridge?.isConnected()) cs.bridge.close("client_detach");
+    // SessionBridge is a ChannelHandler in v2; it forwards pty packet
+    // bytes via the `sendData` callback. For the v1-wire-on-v2-bridge
+    // transition we route the bytes straight to `cs.connection.send`
+    // (the underlying Noise transport) — phase 4 wraps them in a
+    // channel frame instead.
+    cs.bridge = new SessionBridge((payload) => cs.connection.send(payload));
     cs.bridge
       .attach(session, (msg.cols as number) || 80, (msg.rows as number) || 24)
       .then(() => {
@@ -370,8 +372,8 @@ export function handleSessionControlMessage(
           ],
           { timeout: 5000, cwd }
         );
-        if (cs.bridge?.isConnected()) cs.bridge.close();
-        cs.bridge = new SessionBridge(cs.connection as any);
+        if (cs.bridge?.isConnected()) cs.bridge.close("client_detach");
+        cs.bridge = new SessionBridge((payload) => cs.connection.send(payload));
         await cs.bridge.attach(name, cols, rows);
         options.log?.(
           `Spawned and bridging session "${name}" for client ${clientId}`
@@ -404,7 +406,7 @@ export function teardownSharedClient(cs: SharedClientSession): void {
     hadHeartbeat: !!cs.eventsHeartbeat,
   });
   if (cs.bridge) {
-    cs.bridge.close();
+    cs.bridge.close("peer_lost");
     cs.bridge = null;
   }
   if (cs.eventsHeartbeat) {

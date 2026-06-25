@@ -22,16 +22,18 @@ function makeDispatcher() {
   const registry = new ChannelRegistry();
   const sent: Uint8Array[] = [];
   const control: ControlMessage[] = [];
+  const app: Array<{ type: string; json: Record<string, unknown> }> = [];
   const fatal: Array<{ code: string; message: string }> = [];
   const dispatcher = new ChannelDispatcher(
     registry,
     (bytes) => sent.push(bytes),
     {
       onControlMessage: (msg) => control.push(msg),
+      onAppMessage: (type, json) => app.push({ type, json }),
       onFatalError: (code, message) => fatal.push({ code, message }),
     },
   );
-  return { dispatcher, registry, sent, control, fatal };
+  return { dispatcher, registry, sent, control, app, fatal };
 }
 
 function encodeControlFrame(msg: ControlMessage): Uint8Array {
@@ -83,17 +85,22 @@ describe("ChannelDispatcher — control channel", () => {
     expect(fatal[0].code).toBe("control_frame_json");
   });
 
-  it("flags unknown control type as unknown_control_type", () => {
-    const { dispatcher, fatal } = makeDispatcher();
+  it("routes an unknown JSON `type` to onAppMessage as a pass-through (v1 session RPCs ride here)", () => {
+    const { dispatcher, app, fatal, control } = makeDispatcher();
     dispatcher.handlePlaintext(
       encodeFrame(
         CONTROL_CHANNEL_ID,
         FRAME_TYPE.DATA,
-        new TextEncoder().encode(JSON.stringify({ type: "from_the_future" })),
+        new TextEncoder().encode(
+          JSON.stringify({ type: "hello", client: "cli", label: "laptop" }),
+        ),
       ),
     );
-    expect(fatal).toHaveLength(1);
-    expect(fatal[0].code).toBe("unknown_control_type");
+    expect(fatal).toHaveLength(0);
+    expect(control).toHaveLength(0);
+    expect(app).toHaveLength(1);
+    expect(app[0].type).toBe("hello");
+    expect(app[0].json).toEqual({ type: "hello", client: "cli", label: "laptop" });
   });
 });
 

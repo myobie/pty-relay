@@ -254,7 +254,7 @@ export async function start(
   function teardownClient(clientId: string): void {
     const cs = clients.get(clientId);
     if (!cs) return;
-    if (cs.bridge) { cs.bridge.close(); cs.bridge = null; }
+    if (cs.bridge) { cs.bridge.close("peer_lost"); cs.bridge = null; }
     // Stop any event-subscription fixtures: otherwise inotify/FSWatchers
     // and the heartbeat interval leak for every disconnected subscriber.
     if (cs.eventsHeartbeat) { clearInterval(cs.eventsHeartbeat); cs.eventsHeartbeat = undefined; }
@@ -301,7 +301,14 @@ export async function start(
         if (handleControl(plaintext)) return;
         const cs = clients.get(clientId);
         if (cs?.bridge?.isConnected()) {
-          cs.bridge.handleRelayData(plaintext);
+          // Phase 3 still ships v1 wire (pty packet bytes directly,
+          // not yet wrapped in a channel frame). The ChannelHandler
+          // contract treats `onFrame(type, payload)` as the inbound
+          // entry point; `type=0` (DATA) is the only value v1 ever
+          // emits, so this is a literal forward of the existing
+          // behavior under the new method name. Phase 4 routes via
+          // the ChannelDispatcher after the wire is framed.
+          cs.bridge.onFrame(0, plaintext);
         }
       },
 

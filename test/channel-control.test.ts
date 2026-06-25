@@ -16,7 +16,7 @@ describe("parseControlMessage — channel_open (pty)", () => {
       bytesFromJson({ type: "channel_open", id: 1, mode: "pty", session: "demo" })
     );
     expect(r.ok).toBe(true);
-    if (!r.ok) return;
+    if (!r.ok || r.kind !== "control") return;
     expect(r.msg).toMatchObject({
       type: "channel_open",
       id: 1,
@@ -37,7 +37,7 @@ describe("parseControlMessage — channel_open (pty)", () => {
       })
     );
     expect(r.ok).toBe(true);
-    if (!r.ok || r.msg.type !== "channel_open" || r.msg.mode !== "pty") return;
+    if (!r.ok || r.kind !== "control" || r.msg.type !== "channel_open" || r.msg.mode !== "pty") return;
     expect(r.msg.cols).toBe(80);
     expect(r.msg.rows).toBe(24);
   });
@@ -70,7 +70,7 @@ describe("parseControlMessage — channel_open (exec)", () => {
       })
     );
     expect(r.ok).toBe(true);
-    if (!r.ok || r.msg.type !== "channel_open" || r.msg.mode !== "exec") return;
+    if (!r.ok || r.kind !== "control" || r.msg.type !== "channel_open" || r.msg.mode !== "exec") return;
     expect(r.msg.argv).toEqual(["rsync", "--server"]);
     expect(r.msg.env).toBeUndefined();
     expect(r.msg.cwd).toBeUndefined();
@@ -88,7 +88,7 @@ describe("parseControlMessage — channel_open (exec)", () => {
       })
     );
     expect(r.ok).toBe(true);
-    if (!r.ok || r.msg.type !== "channel_open" || r.msg.mode !== "exec") return;
+    if (!r.ok || r.kind !== "control" || r.msg.type !== "channel_open" || r.msg.mode !== "exec") return;
     expect(r.msg.env).toEqual({ PATH: "/usr/bin" });
     expect(r.msg.cwd).toBe("/tmp");
   });
@@ -105,7 +105,7 @@ describe("parseControlMessage — channel_open (exec)", () => {
       })
     );
     expect(r.ok).toBe(true);
-    if (!r.ok || r.msg.type !== "channel_open" || r.msg.mode !== "exec") return;
+    if (!r.ok || r.kind !== "control" || r.msg.type !== "channel_open" || r.msg.mode !== "exec") return;
     expect(r.msg.env).toBeNull();
     expect(r.msg.cwd).toBeNull();
   });
@@ -149,7 +149,7 @@ describe("parseControlMessage — channel_open_ack / error", () => {
       bytesFromJson({ type: "channel_open_ack", id: 7 })
     );
     expect(r.ok).toBe(true);
-    if (!r.ok) return;
+    if (!r.ok || r.kind !== "control") return;
     expect(r.msg).toEqual({ type: "channel_open_ack", id: 7 });
   });
 
@@ -172,7 +172,7 @@ describe("parseControlMessage — channel_open_ack / error", () => {
         })
       );
       expect(r.ok, `failed for ${code}`).toBe(true);
-      if (!r.ok || r.msg.type !== "channel_open_error") return;
+      if (!r.ok || r.kind !== "control" || r.msg.type !== "channel_open_error") return;
       expect(r.msg.code).toBe(code);
     }
   });
@@ -212,7 +212,7 @@ describe("parseControlMessage — channel_close / channel_exit", () => {
       bytesFromJson({ type: "channel_exit", id: 1, exit_code: 0, signal: null })
     );
     expect(r.ok).toBe(true);
-    if (!r.ok || r.msg.type !== "channel_exit") return;
+    if (!r.ok || r.kind !== "control" || r.msg.type !== "channel_exit") return;
     expect(r.msg.exit_code).toBe(0);
     expect(r.msg.signal).toBeNull();
   });
@@ -227,7 +227,7 @@ describe("parseControlMessage — channel_close / channel_exit", () => {
       })
     );
     expect(r.ok).toBe(true);
-    if (!r.ok || r.msg.type !== "channel_exit") return;
+    if (!r.ok || r.kind !== "control" || r.msg.type !== "channel_exit") return;
     expect(r.msg.exit_code).toBeNull();
     expect(r.msg.signal).toBe("SIGTERM");
   });
@@ -261,7 +261,7 @@ describe("parseControlMessage — keepalive / error / unknown", () => {
   it("parses keepalive", () => {
     const r = parseControlMessage(bytesFromJson({ type: "keepalive" }));
     expect(r.ok).toBe(true);
-    if (!r.ok) return;
+    if (!r.ok || r.kind !== "control") return;
     expect(r.msg).toEqual({ type: "keepalive" });
   });
 
@@ -270,18 +270,18 @@ describe("parseControlMessage — keepalive / error / unknown", () => {
       bytesFromJson({ type: "error", code: "frame_too_large", message: "oops" })
     );
     expect(r.ok).toBe(true);
-    if (!r.ok || r.msg.type !== "error") return;
+    if (!r.ok || r.kind !== "control" || r.msg.type !== "error") return;
     expect(r.msg.code).toBe("frame_too_large");
   });
 
-  it("returns unknown_control_type for an unrecognized type", () => {
+  it("returns an `app` envelope for unrecognized types (v1 session RPC passthrough)", () => {
     const r = parseControlMessage(
-      bytesFromJson({ type: "from_the_future", id: 1 })
+      bytesFromJson({ type: "from_the_future", id: 1, foo: "bar" }),
     );
-    expect(r.ok).toBe(false);
-    if (r.ok) return;
-    expect(r.code).toBe("unknown_control_type");
-    expect(r.detail).toBe("from_the_future");
+    expect(r.ok).toBe(true);
+    if (!r.ok || r.kind !== "app") return;
+    expect(r.type).toBe("from_the_future");
+    expect(r.json).toEqual({ type: "from_the_future", id: 1, foo: "bar" });
   });
 });
 
@@ -376,7 +376,7 @@ describe("encodeControlMessage round-trip", () => {
       const bytes = encodeControlMessage(msg);
       const parsed = parseControlMessage(bytes);
       expect(parsed.ok, `round-trip failed for ${msg.type}`).toBe(true);
-      if (!parsed.ok) continue;
+      if (!parsed.ok || parsed.kind !== "control") continue;
       expect(parsed.msg).toEqual(msg);
     }
   });

@@ -111,8 +111,18 @@ export type ParseError =
   | "control_frame_shape"
   | "unknown_control_type";
 
+/**
+ * Successful parse — either a strictly-typed channel-lifecycle message
+ * (`kind: "control"`) or an opaque application JSON object that's
+ * shape-valid but not a known control type (`kind: "app"`). The
+ * dispatcher routes `app` messages through `onAppMessage` so the
+ * v1 session-level RPCs (hello / list / peek / send / tag / events_* /
+ * spawn / approved / latency_report / mint_request) flow through
+ * channel 0 unchanged.
+ */
 export type ParseResult =
-  | { ok: true; msg: ControlMessage }
+  | { ok: true; kind: "control"; msg: ControlMessage }
+  | { ok: true; kind: "app"; type: string; json: Record<string, unknown> }
   | { ok: false; code: ParseError; detail?: string };
 
 /**
@@ -150,29 +160,44 @@ export function parseControlMessage(payload: Uint8Array): ParseResult {
 
   switch (o.type) {
     case "channel_open":
-      return parseChannelOpen(o);
+      return wrapControl(parseChannelOpen(o));
     case "channel_open_ack":
-      return parseChannelOpenAck(o);
+      return wrapControl(parseChannelOpenAck(o));
     case "channel_open_error":
-      return parseChannelOpenError(o);
+      return wrapControl(parseChannelOpenError(o));
     case "channel_close":
-      return parseChannelClose(o);
+      return wrapControl(parseChannelClose(o));
     case "channel_exit":
-      return parseChannelExit(o);
+      return wrapControl(parseChannelExit(o));
     case "keepalive":
-      return { ok: true, msg: { type: "keepalive" } };
+      return { ok: true, kind: "control", msg: { type: "keepalive" } };
     case "error":
-      return parseConnectionError(o);
+      return wrapControl(parseConnectionError(o));
     default:
-      return {
-        ok: false,
-        code: "unknown_control_type",
-        detail: o.type,
-      };
+      return { ok: true, kind: "app", type: o.type, json: o };
   }
 }
 
-function parseChannelOpen(o: Record<string, unknown>): ParseResult {
+/** Promote a typed parse from the helper functions to the kind-tagged
+ *  envelope used by parseControlMessage's callers. */
+function wrapControl(
+  inner:
+    | { ok: true; msg: ControlMessage }
+    | { ok: false; code: ParseError; detail?: string },
+): ParseResult {
+  if (inner.ok) return { ok: true, kind: "control", msg: inner.msg };
+  return inner;
+}
+
+/** Inner-shape return type used by the per-message helpers below, which
+ *  always produce a typed control message or a structured error; the
+ *  outer `parseControlMessage` wraps `ok` results with `kind: "control"`
+ *  via wrapControl. */
+type InnerResult =
+  | { ok: true; msg: ControlMessage }
+  | { ok: false; code: ParseError; detail?: string };
+
+function parseChannelOpen(o: Record<string, unknown>): InnerResult {
   if (!isValidId(o.id)) return shape("channel_open.id");
   if (o.mode === "pty") {
     if (typeof o.session !== "string" || o.session.length === 0) {
@@ -224,12 +249,12 @@ function parseChannelOpen(o: Record<string, unknown>): ParseResult {
   return shape("channel_open.mode");
 }
 
-function parseChannelOpenAck(o: Record<string, unknown>): ParseResult {
+function parseChannelOpenAck(o: Record<string, unknown>): InnerResult {
   if (!isValidId(o.id)) return shape("channel_open_ack.id");
   return { ok: true, msg: { type: "channel_open_ack", id: o.id as number } };
 }
 
-function parseChannelOpenError(o: Record<string, unknown>): ParseResult {
+function parseChannelOpenError(o: Record<string, unknown>): InnerResult {
   if (!isValidId(o.id)) return shape("channel_open_error.id");
   if (
     o.code !== "mode_not_enabled" &&
@@ -253,7 +278,7 @@ function parseChannelOpenError(o: Record<string, unknown>): ParseResult {
   };
 }
 
-function parseChannelClose(o: Record<string, unknown>): ParseResult {
+function parseChannelClose(o: Record<string, unknown>): InnerResult {
   if (!isValidId(o.id)) return shape("channel_close.id");
   if (
     o.reason !== "client_detach" &&
@@ -274,7 +299,7 @@ function parseChannelClose(o: Record<string, unknown>): ParseResult {
   };
 }
 
-function parseChannelExit(o: Record<string, unknown>): ParseResult {
+function parseChannelExit(o: Record<string, unknown>): InnerResult {
   if (!isValidId(o.id)) return shape("channel_exit.id");
   const exit_code =
     typeof o.exit_code === "number" ? o.exit_code : o.exit_code === null ? null : undefined;
@@ -298,7 +323,7 @@ function parseChannelExit(o: Record<string, unknown>): ParseResult {
   };
 }
 
-function parseConnectionError(o: Record<string, unknown>): ParseResult {
+function parseConnectionError(o: Record<string, unknown>): InnerResult {
   if (typeof o.code !== "string") return shape("error.code");
   const message = typeof o.message === "string" ? o.message : "";
   return {
@@ -315,7 +340,7 @@ function isValidId(v: unknown): v is number {
   return typeof v === "number" && Number.isInteger(v) && v >= 1 && v <= 0xffffffff;
 }
 
-function shape(detail: string): ParseResult {
+function shape(detail: string): InnerResult {
   return { ok: false, code: "control_frame_shape", detail };
 }
 
