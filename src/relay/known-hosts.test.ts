@@ -55,8 +55,11 @@ describe("known-hosts", () => {
   });
 
   it("saves multiple hosts", async () => {
-    await saveKnownHost("mac-1", "https://relay.example.com#key1.secret1", store);
-    await saveKnownHost("mac-2", "https://relay.example.com#key2.secret2", store);
+    // Note: must be genuinely different hosts (different URL.host) —
+    // saveKnownHost dedups on host so two entries on the same origin
+    // collapse to one (the more recent key material wins).
+    await saveKnownHost("mac-1", "https://a.example.com#key1.secret1", store);
+    await saveKnownHost("mac-2", "https://b.example.com#key2.secret2", store);
     const hosts = await loadKnownHosts(store);
     expect(hosts).toHaveLength(2);
     expect(hosts[0].label).toBe("mac-1");
@@ -71,9 +74,30 @@ describe("known-hosts", () => {
     expect(hosts[0].label).toBe("new-name");
   });
 
+  it("collapses same-host re-saves to one entry even when key material rotates", async () => {
+    // Regression for the stale-fragment overwrite bug — see
+    // known-hosts.ts saveKnownHost comment. Same host, rotated
+    // `#pk.secret`, must yield ONE entry that keeps the original label
+    // and carries the new URL.
+    await saveKnownHost(
+      "home",
+      "https://relay.example.com#oldKey.oldSecret",
+      store
+    );
+    await saveKnownHost(
+      "home",
+      "https://relay.example.com#newKey.newSecret",
+      store
+    );
+    const hosts = await loadKnownHosts(store);
+    expect(hosts).toHaveLength(1);
+    expect(hosts[0].label).toBe("home");
+    expect(hosts[0].url).toBe("https://relay.example.com#newKey.newSecret");
+  });
+
   it("removes a host by label", async () => {
-    await saveKnownHost("mac-1", "https://relay.example.com#key1.secret1", store);
-    await saveKnownHost("mac-2", "https://relay.example.com#key2.secret2", store);
+    await saveKnownHost("mac-1", "https://a.example.com#key1.secret1", store);
+    await saveKnownHost("mac-2", "https://b.example.com#key2.secret2", store);
     await removeKnownHost("mac-1", store);
     const hosts = await loadKnownHosts(store);
     expect(hosts).toHaveLength(1);

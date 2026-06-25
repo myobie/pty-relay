@@ -163,6 +163,58 @@ describe("label-collision avoidance on save", () => {
     expect(hosts[0].label).toBe("second-name");
   });
 
+  it("saveKnownHost overwrites in place when the same host arrives with rotated key material (regression: known-hosts-host-dedup)", async () => {
+    // Scenario: remote host's state was wiped, daemon came back up with
+    // fresh #pk.secret. User runs `connect <new-token-url>`. We must
+    // overwrite the stale entry — not append a second one that the old
+    // label still resolves to. Pre-fix this filtered on the full URL
+    // (including fragment) so the dedup missed, and the stale row kept
+    // the original label while the new one got a URL-suffixed label.
+    const store = new MemStore();
+    await saveKnownHost("home", "http://a.example/#oldPk.oldSecret", store);
+    await saveKnownHost("home", "http://a.example/#newPk.newSecret", store);
+    const hosts = await loadKnownHosts(store);
+    expect(hosts.length).toBe(1);
+    expect(hosts[0].label).toBe("home");
+    expect(hosts[0].url).toBe("http://a.example/#newPk.newSecret");
+  });
+
+  it("saveKnownHost overwrites in place even when only the secret rotates", async () => {
+    // Same pubkey, new secret — still the same daemon, dedup must hit.
+    const store = new MemStore();
+    await saveKnownHost("home", "http://a.example/#pk.s1", store);
+    await saveKnownHost("home", "http://a.example/#pk.s2", store);
+    const hosts = await loadKnownHosts(store);
+    expect(hosts.length).toBe(1);
+    expect(hosts[0].url).toBe("http://a.example/#pk.s2");
+  });
+
+  it("saveKnownHost host-dedup ignores port-equal-but-host-different (different machines are different entries)", async () => {
+    // a.example:8099 and b.example:8099 share a port but are different
+    // daemons — they must NOT collapse into one entry. URL.host includes
+    // the port + hostname, so the dedup naturally keeps them separate.
+    const store = new MemStore();
+    await saveKnownHost("alice", "http://a.example:8099/#k.s", store);
+    await saveKnownHost("bob", "http://b.example:8099/#k.s", store);
+    const hosts = await loadKnownHosts(store);
+    expect(hosts.length).toBe(2);
+  });
+
+  it("saveKnownHost host-dedup leaves public-relay entries untouched", async () => {
+    // Public-relay entries have no `url` field. The self-hosted save
+    // must not interpret them as "stale self-hosted" and evict them.
+    const store = new MemStore();
+    await savePublicKnownHost(
+      { label: "remote", relayUrl: "http://relay", publicKey: "pk1" },
+      store
+    );
+    await saveKnownHost("local", "http://localhost:8099/#k.s", store);
+    const hosts = await loadKnownHosts(store);
+    expect(hosts.length).toBe(2);
+    expect(hosts.some((h) => h.label === "remote" && isPublicHost(h))).toBe(true);
+    expect(hosts.some((h) => h.label === "local" && h.url === "http://localhost:8099/#k.s")).toBe(true);
+  });
+
   it("savePublicKnownHost re-save of the same pubkey updates the label in place", async () => {
     const store = new MemStore();
     await savePublicKnownHost(
