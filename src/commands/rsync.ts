@@ -31,9 +31,20 @@ export interface RsyncOptions {
   passphraseFile?: string;
 }
 
-export async function rsyncCommand(args: string[], _options: RsyncOptions = {}): Promise<void> {
+export async function rsyncCommand(args: string[], options: RsyncOptions = {}): Promise<void> {
   const self = buildSelfInvocation();
-  const transport = `${self} exec`;
+  // Propagate our own config-dir / passphrase-file flags into the
+  // exec transport invocation, so the spawned `pty-relay exec` (which
+  // does the known-hosts lookup) sees the same store the user passed
+  // to `pty-relay rsync`.
+  const transportFlags: string[] = [];
+  if (options.configDir) {
+    transportFlags.push("--config-dir", quoteForShell(options.configDir));
+  }
+  if (options.passphraseFile) {
+    transportFlags.push("--passphrase-file", quoteForShell(options.passphraseFile));
+  }
+  const transport = [self, "exec", ...transportFlags].join(" ");
 
   // We pass --blocking-io so rsync's process layout interacts cleanly
   // with our pipes (avoid the "no buffer" hang seen with some

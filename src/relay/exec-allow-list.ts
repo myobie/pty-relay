@@ -18,7 +18,15 @@
 
 export const EXEC_ALLOW_LIST: ReadonlyArray<string> = [
   "rsync",
+  // git's smart-protocol clones invoke `git-upload-pack` (read) and
+  // `git-receive-pack` (write) directly — NOT `git upload-pack` as a
+  // subcommand. We keep `git` here too so future plumbing (e.g.
+  // `pty-relay exec <host> git fsck`) just works, but the
+  // `git-upload-pack` / `git-receive-pack` entries are what unlock
+  // `git clone <host>:<repo>` over the relay.
   "git",
+  "git-upload-pack",
+  "git-receive-pack",
 ] as const;
 
 /**

@@ -46,22 +46,18 @@ export async function execCommand(
     process.exit(1);
   }
 
-  await ready();
-  log("cli", "exec begin", { target, argv0: argv[0], argvLen: argv.length });
-
-  // For now we only support self-hosted targets via raw token URL.
-  // Label resolution + public-relay can layer on in a follow-up.
-  if (!target.startsWith("http://") && !target.startsWith("https://")) {
-    process.stderr.write(
-      "Only token URLs are supported in this build of `pty-relay exec`.\n" +
-        "Public-relay label resolution is a follow-up.\n",
-    );
-    process.exit(1);
+  // git passes the entire remote command as one string (matching ssh's
+  // contract that ssh runs `sh -c <command>` on the remote). rsync
+  // passes separate tokens. If we received a single argv element that
+  // looks like a shell command (contains a space), tokenize it so the
+  // daemon's argv allow-list sees the actual argv[0] rather than the
+  // whole joined command.
+  if (argv.length === 1 && /\s/.test(argv[0])) {
+    argv = shellSplit(argv[0]);
   }
 
-  const parsed = parseToken(target);
-  const secretHash = computeSecretHash(parsed.secret);
-  const wsUrl = getWebSocketUrl(parsed.host, "client", secretHash, undefined, parsed.clientToken ?? undefined);
+  await ready();
+  log("cli", "exec begin", { target, argv0: argv[0], argvLen: argv.length });
 
   const { store, passphrase } = await openSecretStore(options.configDir, {
     interactive: false,
@@ -70,6 +66,28 @@ export async function execCommand(
   if (passphrase && !process.env.PTY_RELAY_PASSPHRASE) {
     process.env.PTY_RELAY_PASSPHRASE = passphrase;
   }
+
+  // Resolve labels via known-hosts so rsync's `host:path` syntax can
+  // use a short label instead of trying to fit a token URL (with `:`
+  // and `#`) into the host slot — which rsync's parser would mangle.
+  let tokenUrl: string;
+  if (target.startsWith("http://") || target.startsWith("https://")) {
+    tokenUrl = target;
+  } else {
+    const { resolveHost } = await import("../relay/host-resolve.ts");
+    const resolved = await resolveHost(target, store);
+    if (resolved.kind !== "self") {
+      process.stderr.write(
+        "Public-relay labels aren't yet supported by `pty-relay exec`.\n",
+      );
+      process.exit(1);
+    }
+    tokenUrl = resolved.url;
+  }
+
+  const parsed = parseToken(tokenUrl);
+  const secretHash = computeSecretHash(parsed.secret);
+  const wsUrl = getWebSocketUrl(parsed.host, "client", secretHash, undefined, parsed.clientToken ?? undefined);
 
   let exitCode: number | null = null;
   let signal: string | null = null;
@@ -210,6 +228,61 @@ export async function execCommand(
     process.exit(128 + signalNameToNumber(signal));
   }
   process.exit(exitCode ?? 1);
+}
+
+/**
+ * Minimal shell tokenizer — handles unquoted whitespace splits,
+ * single-quoted and double-quoted strings with backslash escapes.
+ * Sufficient for git's `git-upload-pack '<path>'`-shaped invocations
+ * and the simpler forms rsync uses; not a full sh-compatible parser
+ * (no $-expansion, no $((…)), no backticks). Pulled in inline so
+ * `pty-relay exec` doesn't add a dep on a shell-quote package.
+ */
+function shellSplit(input: string): string[] {
+  const tokens: string[] = [];
+  let current = "";
+  let inSingle = false;
+  let inDouble = false;
+  let i = 0;
+  while (i < input.length) {
+    const c = input[i];
+    if (inSingle) {
+      if (c === "'") inSingle = false;
+      else current += c;
+      i++;
+      continue;
+    }
+    if (inDouble) {
+      if (c === "\\" && i + 1 < input.length) {
+        current += input[i + 1];
+        i += 2;
+        continue;
+      }
+      if (c === '"') inDouble = false;
+      else current += c;
+      i++;
+      continue;
+    }
+    if (c === "'") { inSingle = true; i++; continue; }
+    if (c === '"') { inDouble = true; i++; continue; }
+    if (c === "\\" && i + 1 < input.length) {
+      current += input[i + 1];
+      i += 2;
+      continue;
+    }
+    if (/\s/.test(c)) {
+      if (current.length > 0) {
+        tokens.push(current);
+        current = "";
+      }
+      i++;
+      continue;
+    }
+    current += c;
+    i++;
+  }
+  if (current.length > 0) tokens.push(current);
+  return tokens;
 }
 
 function signalNameToNumber(name: string): number {

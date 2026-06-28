@@ -254,24 +254,24 @@ async function main(): Promise<void> {
     }
 
     case "exec": {
-      // Shape: pty-relay exec <target> <argv...>
-      // Designed for rsync's `-e` integration, so we DON'T require a
-      // `--` separator between flags and argv — everything after the
-      // target is the remote argv. Our own flags are config-only
-      // (--config-dir, --passphrase-file) and parsed via getFlag from
-      // anywhere in the line, so the remote argv stays clean.
-      const target = args[1];
-      if (!target) {
-        console.error("Usage: pty-relay exec <target> <argv...>");
-        process.exit(1);
-      }
+      // Shape: pty-relay exec [--config-dir <dir>] <target> <argv...>
+      // Designed for rsync's `-e` integration where rsync runs the
+      // transport as `<transport-tokens> <host> <remote-command>`.
+      // The transport-tokens may include our own --config-dir /
+      // --passphrase-file flags, so we strip them out first and take
+      // the first remaining positional as the target. Everything after
+      // is the remote argv, verbatim.
       const configDir = getFlag("--config-dir") ?? undefined;
-      // Strip out our own recognized flags + their values from the
-      // remote argv. Everything else is for the remote process.
-      const remoteArgv = stripOwnFlags(args.slice(2), [
+      const stripped = stripOwnFlags(args.slice(1), [
         "--config-dir",
         "--passphrase-file",
       ]);
+      const target = stripped[0];
+      if (!target) {
+        console.error("Usage: pty-relay exec [--config-dir <dir>] <target> <argv...>");
+        process.exit(1);
+      }
+      const remoteArgv = stripped.slice(1);
       const { execCommand } = await import("./commands/exec.ts");
       await execCommand(target, remoteArgv, { configDir, passphraseFile });
       break;
