@@ -21,6 +21,10 @@ import {
   saveDaemonPid,
   type ClientsData,
 } from "../relay/clients.ts";
+import {
+  saveDaemonRuntime,
+  clearDaemonRuntime,
+} from "../relay/daemon-runtime.ts";
 import { sanitizeRemoteString } from "../sanitize.ts";
 import { handleSessionControlMessage } from "./start-shared.ts";
 import { log } from "../log.ts";
@@ -147,13 +151,26 @@ export async function start(
   console.log(`Token URL: ${osc8Link(tokenUrl)}`);
 
   // Tailscale HTTPS support
+  let tailscaleSetup: TailscaleSetup | null = null;
   if (options?.tailscale) {
-    const tsUrl = await setupTailscale(port, config);
-    if (tsUrl) {
-      console.log(`Tailscale: ${osc8Link(tsUrl)}`);
-      printQrCode(tsUrl);
+    tailscaleSetup = await setupTailscale(port, config);
+    if (tailscaleSetup) {
+      console.log(`Tailscale: ${osc8Link(tailscaleSetup.tokenUrl)}`);
+      printQrCode(tailscaleSetup.tokenUrl);
     }
   }
+
+  // Persist runtime metadata (port, bind, tailscale hostname if any)
+  // so `pty-relay local status --show-token` can compose the same
+  // external URL we just printed instead of falling back to
+  // localhost:8099. No secrets in this file — see daemon-runtime.ts.
+  saveDaemonRuntime(configDir ?? defaultConfigDir(), {
+    port,
+    bind: options?.bind ?? "0.0.0.0",
+    tailscale: tailscaleSetup
+      ? { hostname: tailscaleSetup.dnsName, port: 443, scheme: "https" }
+      : undefined,
+  });
 
   // Write the PID file in every mode, not just approval mode. The
   // approval TUI uses it to signal the daemon, and `local status`
@@ -417,12 +434,16 @@ export async function start(
     });
   }
 
-  // Clean up PID file on exit
+  // Clean up PID file + runtime record on exit so a subsequent
+  // `local status` doesn't see "stale pid" / claim the daemon is up
+  // when it isn't.
   process.on("exit", () => {
     if (cleanupPid) cleanupPid();
+    clearDaemonRuntime(configDir ?? defaultConfigDir());
   });
   process.on("SIGINT", () => {
     if (cleanupPid) cleanupPid();
+    clearDaemonRuntime(configDir ?? defaultConfigDir());
     process.exit(0);
   });
 
@@ -637,7 +658,15 @@ function getTailscaleDnsName(cli: string): string | null {
   }
 }
 
-async function setupTailscale(port: number, config: Config): Promise<string | null> {
+/** Returned shape of setupTailscale. `tokenUrl` carries the `#pk.secret`
+ *  fragment for display; `dnsName` is the bare hostname suitable for
+ *  persistence into daemon-runtime.json (which never holds secrets). */
+interface TailscaleSetup {
+  dnsName: string;
+  tokenUrl: string;
+}
+
+async function setupTailscale(port: number, config: Config): Promise<TailscaleSetup | null> {
   const cli = findTailscaleCli();
   if (!cli) {
     console.error("Warning: --tailscale specified but tailscale CLI not found");
@@ -680,5 +709,5 @@ async function setupTailscale(port: number, config: Config): Promise<string | nu
   // Give it a moment to start
   await new Promise((r) => setTimeout(r, 1000));
 
-  return getTokenUrl(dnsName, config);
+  return { dnsName, tokenUrl: getTokenUrl(dnsName, config) };
 }

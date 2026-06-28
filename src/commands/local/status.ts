@@ -5,6 +5,10 @@ import { log } from "../../log.ts";
 import { defaultConfigDir, openSecretStore } from "../../storage/bootstrap.ts";
 import { loadLabel } from "../../relay/config.ts";
 import { loadClients } from "../../relay/clients.ts";
+import {
+  loadDaemonRuntime,
+  buildExternalTokenUrl,
+} from "../../relay/daemon-runtime.ts";
 import sodium from "libsodium-wrappers-sumo";
 import { ready, computeSecretHash, createToken } from "../../crypto/index.ts";
 import { osc8Link } from "../../terminal-link.ts";
@@ -106,7 +110,7 @@ export async function localStatusCommand(opts: LocalStatusOpts): Promise<void> {
     if (opts.showToken && config) {
       // Token URL has the pairing secret in the fragment; gated on
       // --show-token like the text path below.
-      out.tokenUrl = buildLocalhostTokenUrl(config.publicKey, config.secret);
+      out.tokenUrl = buildStatusTokenUrl(dir, config.publicKey, config.secret);
     }
     console.log(JSON.stringify(out, null, 2));
     return;
@@ -137,13 +141,11 @@ export async function localStatusCommand(opts: LocalStatusOpts): Promise<void> {
 
   if (opts.showToken && config) {
     console.log("");
-    // Printed last so it's trivially easy to copy. The URL uses
-    // localhost — no way from here to know which external hostname
-    // `local start` was invoked with (Tailscale, LAN, etc.). That's
-    // fine for `--show-token` which is mostly for developer sanity
-    // checks; the authoritative URL is whatever `local start`
-    // prints on boot.
-    console.log(`  Token URL:   ${osc8Link(buildLocalhostTokenUrl(config.publicKey, config.secret))}`);
+    // Printed last so it's trivially easy to copy. The URL prefers the
+    // tailscale-advertised hostname when `--tailscale` was set at
+    // start time (via daemon-runtime.json), and falls back to
+    // localhost when no runtime record is on disk.
+    console.log(`  Token URL:   ${osc8Link(buildStatusTokenUrl(dir, config.publicKey, config.secret))}`);
   } else if (!opts.showToken) {
     console.log("");
     console.log(`  (Run \`pty-relay local status --show-token\` to print the token URL.)`);
@@ -201,14 +203,19 @@ function base64OriginalDecode(s: unknown): Uint8Array | null {
   }
 }
 
-function buildLocalhostTokenUrl(
+function buildStatusTokenUrl(
+  configDir: string,
   publicKey: Uint8Array,
-  secret: Uint8Array
+  secret: Uint8Array,
 ): string {
-  // Use the same shape the daemon prints on startup so copy/paste
-  // works identically. We don't know the port without reading process
-  // state, so fall back to 8099 (`local start`'s default). If the
-  // operator is running on a different port, the authoritative URL
-  // is whatever `local start` printed — status is best-effort.
+  // Prefer the daemon-runtime.json record the running daemon wrote on
+  // boot (tailscale hostname when --tailscale was set, real port,
+  // etc.). Fall back to `localhost:8099` only when there's no record
+  // — keeps `--show-token` useful on a never-started config and on
+  // older daemons that haven't been restarted since this code shipped.
+  const runtime = loadDaemonRuntime(configDir);
+  if (runtime) {
+    return buildExternalTokenUrl(runtime, publicKey, secret, createToken);
+  }
   return createToken("localhost:8099", publicKey, secret);
 }
