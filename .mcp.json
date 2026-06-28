@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "st": {
+      "type": "stdio",
+      "command": "/Volumes/SSD/src/github.com/myobie/coord/bin/st",
+      "args": [
+        "mcp",
+        "--channel"
+      ],
+      "env": {}
+    }
+  }
+}
