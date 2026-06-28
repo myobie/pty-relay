@@ -2,6 +2,13 @@ import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { WebglAddon } from "@xterm/addon-webgl";
 import sodium from "libsodium-wrappers-sumo";
+import {
+  encodeFrame as ch_encodeFrame,
+  decodeFrame as ch_decodeFrame,
+  CONTROL_CHANNEL_ID as CH_CONTROL,
+  DEFAULT_PTY_CHANNEL_ID as CH_PTY,
+  FRAME_TYPE as CH_FRAME_TYPE,
+} from "../../src/relay/channel-framing.ts";
 
 // ── Protocol constants ──
 
@@ -904,11 +911,14 @@ function sendEncrypted(data: Uint8Array | string): void {
 }
 
 function sendJson(obj: unknown): void {
-  sendEncrypted(new TextEncoder().encode(JSON.stringify(obj)));
+  // v2 framing: channel-0 DATA frame carrying the v1 JSON RPC.
+  const payload = new TextEncoder().encode(JSON.stringify(obj));
+  sendEncrypted(ch_encodeFrame(CH_CONTROL, CH_FRAME_TYPE.DATA, payload));
 }
 
 function sendPtyPacket(packet: Uint8Array): void {
-  sendEncrypted(packet);
+  // v2 framing: channel-DEFAULT_PTY_CHANNEL_ID DATA frame.
+  sendEncrypted(ch_encodeFrame(CH_PTY, CH_FRAME_TYPE.DATA, packet));
 }
 
 function disconnect(): void {
@@ -1000,7 +1010,27 @@ function attachToSession(sessionName: string, _cols: number, _rows: number): voi
   });
 }
 
-function handleDecryptedMessage(plaintext: Uint8Array): void {
+function handleDecryptedMessage(rawPlaintext: Uint8Array): void {
+  // v2 framing: decode the channel frame; route channel 0 → JSON app
+  // dispatch, channel-DEFAULT_PTY_CHANNEL_ID → pty packet parser.
+  const decoded = ch_decodeFrame(rawPlaintext);
+  if (!decoded.ok) {
+    showStatus(`Protocol error: ${decoded.code}`);
+    return;
+  }
+  const { channelId, payload: plaintext } = decoded.frame;
+  if (channelId === CH_CONTROL) {
+    handleAppFrame(plaintext);
+    return;
+  }
+  if (channelId === CH_PTY) {
+    handlePtyFrame(plaintext);
+    return;
+  }
+  // Unknown channel — drop. Phase 4 will register exec channels here.
+}
+
+function handleAppFrame(plaintext: Uint8Array): void {
   if (!sessionAttached) {
     try {
       const msg = JSON.parse(new TextDecoder().decode(plaintext));
@@ -1065,6 +1095,16 @@ function handleDecryptedMessage(plaintext: Uint8Array): void {
       }
     } catch {}
   }
+  // Post-attach app messages (e.g. "sessions" after re-list, "error"
+  // mid-session) still flow through channel 0; route them here too.
+  try {
+    const msg = JSON.parse(new TextDecoder().decode(plaintext));
+    if (msg.type === "sessions") renderSessionList(msg.sessions);
+    else if (msg.type === "error") showStatus(`Error: ${msg.message}`);
+  } catch {}
+}
+
+function handlePtyFrame(plaintext: Uint8Array): void {
   const packets = packetParser.feed(plaintext);
   for (const pkt of packets) {
     switch (pkt.type) {

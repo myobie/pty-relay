@@ -7,6 +7,8 @@ import { loadDaemonConfig, getTokenUrl, loadLabel } from "../relay/config.ts";
 import { PrimaryRelayConnection } from "../relay/primary-connection.ts";
 import { RelayConnection } from "../relay/relay-connection.ts";
 import { SessionBridge } from "../relay/session-bridge.ts";
+import { ChannelConnection } from "../relay/channel-connection.ts";
+import { handleChannelOpenControl } from "../relay/channel-open-handler.ts";
 import { ClientTracker } from "../relay/client-tracker.ts";
 import { EventFollower } from "@myobie/pty/client";
 import { execFileSync, execSync, spawn as childSpawn } from "node:child_process";
@@ -33,7 +35,14 @@ const MAX_PENDING_CLIENTS = 20;
 const PENDING_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes
 
 interface ClientSession {
-  connection: RelayConnection;
+  /** Raw Noise transport. Kept for low-level lifecycle calls (close).
+   *  All wire I/O goes through `connection` (the v2 framing + channel-
+   *  mux wrapper). */
+  rawConnection: RelayConnection;
+  /** Channel-mux wrapper around `rawConnection`. Exposes sendApp /
+   *  sendBridgeData / attachBridge — the surface SharedClientSession
+   *  is structurally compatible with. */
+  connection: ChannelConnection;
   bridge: SessionBridge | null;
   tracker: ClientTracker;
   tokenId: string | null;
@@ -63,6 +72,10 @@ export async function start(
   configDir?: string,
   options?: {
     allowNewSessions?: boolean;
+    /** When true: clients can open `exec`-mode channels that spawn
+     *  non-PTY processes (rsync / git over relay). The argv allow-list
+     *  is enforced regardless. Off by default. */
+    allowExec?: boolean;
     tailscale?: boolean;
     autoApprove?: boolean;
     passphraseFile?: string;
@@ -169,19 +182,10 @@ export async function start(
   function makeControlMessageHandler(
     clientId: string,
     getClientSession: () => ClientSession | undefined
-  ): (plaintext: Uint8Array) => boolean {
-    return function handleControlMessage(plaintext: Uint8Array): boolean {
-      if (plaintext.length === 0 || plaintext[0] !== 0x7b) return false;
-
+  ): (msg: Record<string, unknown>) => boolean {
+    return function handleControlMessage(msg: Record<string, unknown>): boolean {
       const cs = getClientSession();
       if (!cs) return false;
-
-      let msg: Record<string, unknown>;
-      try {
-        msg = JSON.parse(new TextDecoder().decode(plaintext));
-      } catch {
-        return false;
-      }
 
       // Latency reports from the web UI's tracker. The browser sends
       // a structured payload every 30s with keystroke samples + WS
@@ -254,12 +258,13 @@ export async function start(
   function teardownClient(clientId: string): void {
     const cs = clients.get(clientId);
     if (!cs) return;
-    if (cs.bridge) { cs.bridge.close(); cs.bridge = null; }
+    if (cs.bridge) { cs.bridge.close("peer_lost"); cs.bridge = null; }
     // Stop any event-subscription fixtures: otherwise inotify/FSWatchers
     // and the heartbeat interval leak for every disconnected subscriber.
     if (cs.eventsHeartbeat) { clearInterval(cs.eventsHeartbeat); cs.eventsHeartbeat = undefined; }
     if (cs.eventsFollower) { cs.eventsFollower.stop(); cs.eventsFollower = undefined; }
-    cs.connection.close();
+    cs.connection.closeAll("peer_lost");
+    cs.rawConnection.close();
     clients.delete(clientId);
     console.log(`Client ${clientId} disconnected. (${clients.size} active)`);
   }
@@ -280,7 +285,14 @@ export async function start(
       () => clients.get(clientId)
     );
 
-    const connection = new RelayConnection(perClientUrl, config, {
+    // `rawConnection` and `channel` form a layered pair: the Noise
+    // transport ships ciphertext; the ChannelConnection ships framed
+    // channel-mux plaintext that the dispatcher routes. Forward
+    // references between them are handled via late lookup into the
+    // `clients` map (so closures see whichever object lands first).
+    let channel: ChannelConnection | null = null;
+
+    const rawConnection = new RelayConnection(perClientUrl, config, {
       onConnected: () => {},
 
       onPaired: (_meta) => {
@@ -288,21 +300,19 @@ export async function start(
       },
 
       onHandshakeComplete: () => {
-        // If the client was approved with a token, send it inside the encrypted tunnel
+        // If the client was approved with a token, send it inside the
+        // encrypted tunnel — channel-0 framed v1 app message.
         const cs = clients.get(clientId);
         if (cs?.tokenId) {
-          cs.connection.send(new TextEncoder().encode(
-            JSON.stringify({ type: "approved", client_token: cs.tokenId })
-          ));
+          cs.connection.sendApp({ type: "approved", client_token: cs.tokenId });
         }
       },
 
       onEncryptedMessage: (plaintext: Uint8Array) => {
-        if (handleControl(plaintext)) return;
-        const cs = clients.get(clientId);
-        if (cs?.bridge?.isConnected()) {
-          cs.bridge.handleRelayData(plaintext);
-        }
+        // Hand off to the channel-mux dispatcher; it routes channel-0
+        // app messages to onApp (below) and DEFAULT_PTY_CHANNEL_ID
+        // bridge data to the registered bridge handler.
+        channel?.handlePlaintext(plaintext);
       },
 
       onPeerDisconnected: () => {
@@ -318,8 +328,37 @@ export async function start(
       },
     });
 
-    clients.set(clientId, { connection, bridge: null, tracker, tokenId: tokenId ?? null });
-    connection.connect();
+    channel = new ChannelConnection(
+      (frame) => rawConnection.send(frame),
+      {
+        onApp: (_type, json) => {
+          // handleControl handles latency_report + hello (label
+          // backfill); everything else falls through to the shared
+          // session vocabulary (list / attach / peek / send / tag /
+          // events_* / spawn).
+          if (handleControl(json)) return;
+        },
+        onControl: (msg) => {
+          if (!channel) return;
+          handleChannelOpenControl(channel, msg, {
+            allowExec: !!options?.allowExec,
+          });
+        },
+        onFatal: (code, message) => {
+          console.error(`Client ${clientId} protocol error: ${code} ${message}`);
+          teardownClient(clientId);
+        },
+      },
+    );
+
+    clients.set(clientId, {
+      rawConnection,
+      connection: channel,
+      bridge: null,
+      tracker,
+      tokenId: tokenId ?? null,
+    });
+    rawConnection.connect();
   }
 
   /** Approve a pending client: clear timeout, open connection. */

@@ -9,7 +9,6 @@ import {
 } from "@myobie/pty/protocol";
 import type { Packet } from "@myobie/pty/protocol";
 import { TERMINAL_SANITIZE } from "@myobie/pty/client";
-import type { ClientRelayConnection } from "./client-connection.ts";
 import { log } from "../log.ts";
 
 const CTRL_BACKSLASH = 0x1c;
@@ -17,8 +16,22 @@ const CTRL_BACKSLASH = 0x1c;
 const KITTY_CTRL_BACKSLASH = Buffer.from("\x1b[92;5u");
 const DOUBLE_TAP_MS = 300;
 
+/**
+ * Channel-mux send surface the Terminal class needs. The concrete
+ * implementation is `ChannelConnection`; defined structurally here so
+ * other test fixtures or wrappers can plug in without inheriting the
+ * full ChannelConnection type.
+ */
+export interface TerminalConnection {
+  /** Channel-0 JSON RPC (attach, etc). */
+  sendApp(obj: Record<string, unknown>): void;
+  /** Channel-DEFAULT_PTY_CHANNEL_ID pty packet bytes (keystrokes,
+   *  resize, detach). */
+  sendBridgeData(bytes: Uint8Array): void;
+}
+
 export interface TerminalOptions {
-  connection: ClientRelayConnection;
+  connection: TerminalConnection;
   session: string;
   cols: number;
   rows: number;
@@ -34,7 +47,7 @@ export interface TerminalOptions {
  * and renders output from the pty session.
  */
 export class Terminal {
-  private connection: ClientRelayConnection;
+  private connection: TerminalConnection;
   private session: string;
   private packetReader = new PacketReader();
   private lastCtrlBackslash = 0;
@@ -62,51 +75,56 @@ export class Terminal {
       skipAttach: this.skipAttach,
     });
     if (!this.skipAttach) {
-      // Send attach request (JSON, inside the encrypted tunnel)
-      const attachMsg = JSON.stringify({
+      // Send attach request as a channel-0 app message.
+      this.connection.sendApp({
         type: "attach",
         session: this.session,
         cols,
         rows,
       });
-      this.connection.send(new TextEncoder().encode(attachMsg));
     }
     // If skipAttach, the spawn message was already sent by connect.ts
-    // Wait for "spawned" then "attached" responses in handleMessage
+    // Wait for "spawned" then "attached" responses in handleAppMessage
   }
 
   /**
-   * Handle a decrypted message from the daemon.
-   * After the initial "attached" response, all messages are raw pty protocol packets.
+   * v2: a channel-0 app message arrived. connect.ts's `onApp` callback
+   * routes the attached/spawned/error vocabulary here. Returns `true`
+   * iff the type was consumed (callers can rely on this to skip
+   * further dispatch for the same JSON object).
    */
-  handleMessage(data: Uint8Array): void {
-    if (!this.attached) {
-      try {
-        const msg = JSON.parse(new TextDecoder().decode(data));
-        if (msg.type === "spawned") {
-          // Daemon created the session — it will auto-attach, wait for "attached"
-          return;
-        } else if (msg.type === "attached") {
-          log("terminal", "attached", { session: this.session });
-          this.attached = true;
-          this.enterRawMode();
-          return;
-        } else if (msg.type === "error") {
-          if (this.options.onError) {
-            this.cleanup();
-            this.options.onError(msg.message);
-            return;
-          }
-          console.error(`Error: ${msg.message}`);
-          this.cleanup();
-          process.exit(1);
-          return;
-        }
-      } catch {
-        // Not JSON — might be raw pty data if attach was already processed
-      }
+  handleAppMessage(type: string, msg: Record<string, unknown>): boolean {
+    if (this.attached) return false;
+    if (type === "spawned") {
+      // Daemon created the session — it will auto-attach, wait for "attached".
+      return true;
     }
+    if (type === "attached") {
+      log("terminal", "attached", { session: this.session });
+      this.attached = true;
+      this.enterRawMode();
+      return true;
+    }
+    if (type === "error") {
+      const message = typeof msg.message === "string" ? msg.message : "unknown error";
+      if (this.options.onError) {
+        this.cleanup();
+        this.options.onError(message);
+        return true;
+      }
+      console.error(`Error: ${message}`);
+      this.cleanup();
+      process.exit(1);
+    }
+    return false;
+  }
 
+  /**
+   * v2: pty packet bytes arrived on DEFAULT_PTY_CHANNEL_ID. The
+   * `ChannelHandler.onFrame(type, payload)` boundary delivers them
+   * already stripped of the channel frame header.
+   */
+  handlePtyBytes(data: Uint8Array): void {
     // Raw pty protocol packets. A malicious or malfunctioning peer can declare
     // an oversized length header (>32 MiB) to try to exhaust memory on the
     // receiver; PacketReader throws PacketTooLargeError in that case. Tear down
@@ -190,7 +208,7 @@ export class Terminal {
       if (!process.stdout.columns || !process.stdout.rows) return;
       const resizeData = encodeResize(process.stdout.rows, process.stdout.columns);
       try {
-        this.connection.send(resizeData);
+        this.connection.sendBridgeData(resizeData);
       } catch {}
     };
     process.stdout.on("resize", this.resizeHandler);
@@ -239,14 +257,14 @@ export class Terminal {
   private sendData(data: Buffer): void {
     const encoded = encodeData(data.toString());
     try {
-      this.connection.send(encoded);
+      this.connection.sendBridgeData(encoded);
     } catch {}
   }
 
   private detach(): void {
     log("terminal", "detach", { session: this.session });
     try {
-      this.connection.send(encodeDetach());
+      this.connection.sendBridgeData(encodeDetach());
     } catch {}
     this.cleanup();
     process.stdout.write("\r\n[detached]\r\n");

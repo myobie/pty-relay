@@ -45,8 +45,28 @@ const RESERVED_TAG_KEYS = new Set([
 /** Heartbeat cadence for event subscriptions. */
 const EVENTS_HEARTBEAT_MS = 30_000;
 
+/**
+ * Daemon-side per-client session state. The `connection` field is a
+ * `ChannelConnection` (v2) — both daemons construct one wrapping their
+ * underlying `RelayConnection` before storing it here. The shared
+ * vocabulary handlers below use `sendApp(obj)` for JSON RPCs and
+ * `sendBridgeData(bytes)` (via the bridge's sendData callback) for pty
+ * packet bytes; routing is handled by the ChannelConnection's
+ * dispatcher.
+ *
+ * `isReady` is kept for compatibility with rare call sites that gate
+ * sends on transport readiness; the underlying ChannelConnection
+ * doesn't expose it directly, so we only require it when the caller
+ * needs it.
+ */
 export interface SharedClientSession {
-  connection: { send(bytes: Uint8Array): void; isReady?: () => boolean };
+  connection: {
+    sendApp(obj: Record<string, unknown>): void;
+    sendBridgeData(bytes: Uint8Array): void;
+    attachBridge?(bridge: SessionBridge): void;
+    detachBridge?(reason?: string): void;
+    isReady?: () => boolean;
+  };
   bridge: SessionBridge | null;
   eventsFollower?: EventFollower;
   eventsHeartbeat?: ReturnType<typeof setInterval>;
@@ -70,7 +90,7 @@ export function handleSessionControlMessage(
 ): boolean {
   const reply = (payload: Record<string, unknown>) => {
     try {
-      cs.connection.send(new TextEncoder().encode(JSON.stringify(payload)));
+      cs.connection.sendApp(payload);
     } catch {
       // Connection torn down mid-response; nothing to do. Specific late
       // callbacks (peek polling, events) call this from async paths so
@@ -90,7 +110,7 @@ export function handleSessionControlMessage(
   });
 
   if (type === "list") {
-    if (cs.bridge?.isConnected()) cs.bridge.close();
+    if (cs.bridge?.isConnected()) cs.bridge.close("client_detach");
     listSessions().then((sessions) => {
       reply({
         type: "sessions",
@@ -119,11 +139,12 @@ export function handleSessionControlMessage(
       replyError("invalid session name");
       return true;
     }
-    if (cs.bridge?.isConnected()) cs.bridge.close();
-    // The SessionBridge constructor expects the real RelayConnection type.
-    // SharedClientSession's `connection` is typed loosely here so both
-    // daemons can plug in compatible objects; cast at construction time.
-    cs.bridge = new SessionBridge(cs.connection as any);
+    if (cs.bridge?.isConnected()) cs.bridge.close("client_detach");
+    // SessionBridge ships pty packet bytes via its sendData callback;
+    // the ChannelConnection wraps them in a DEFAULT_PTY_CHANNEL_ID
+    // frame and ships across the Noise transport.
+    cs.bridge = new SessionBridge((payload) => cs.connection.sendBridgeData(payload));
+    cs.connection.attachBridge?.(cs.bridge);
     cs.bridge
       .attach(session, (msg.cols as number) || 80, (msg.rows as number) || 24)
       .then(() => {
@@ -370,8 +391,9 @@ export function handleSessionControlMessage(
           ],
           { timeout: 5000, cwd }
         );
-        if (cs.bridge?.isConnected()) cs.bridge.close();
-        cs.bridge = new SessionBridge(cs.connection as any);
+        if (cs.bridge?.isConnected()) cs.bridge.close("client_detach");
+        cs.bridge = new SessionBridge((payload) => cs.connection.sendBridgeData(payload));
+        cs.connection.attachBridge?.(cs.bridge);
         await cs.bridge.attach(name, cols, rows);
         options.log?.(
           `Spawned and bridging session "${name}" for client ${clientId}`
@@ -404,7 +426,7 @@ export function teardownSharedClient(cs: SharedClientSession): void {
     hadHeartbeat: !!cs.eventsHeartbeat,
   });
   if (cs.bridge) {
-    cs.bridge.close();
+    cs.bridge.close("peer_lost");
     cs.bridge = null;
   }
   if (cs.eventsHeartbeat) {
