@@ -14,6 +14,12 @@ import {
   ed25519SkToCurve25519,
 } from "../crypto/key-conversion.ts";
 import { buildPublicClientPairUrl } from "./public-server-url.ts";
+import {
+  encodeFrame,
+  decodeFrame,
+  CONTROL_CHANNEL_ID,
+  FRAME_TYPE,
+} from "./channel-framing.ts";
 import type { EventRecord } from "@myobie/pty/client";
 import type { PublicTarget, RemoteSession } from "./relay-client.ts";
 import WebSocket from "ws";
@@ -179,8 +185,10 @@ export function subscribeRemoteEvents(
         transport = new Transport(handshake.split());
         handshake = null;
         attempts = 0; // successful handshake resets backoff
-        const request = JSON.stringify({ type: "events_subscribe" });
-        sock.send(transport.encrypt(new TextEncoder().encode(request)));
+        // v2 framing: channel-0 DATA frame carrying the JSON RPC.
+        const jsonBytes = new TextEncoder().encode(JSON.stringify({ type: "events_subscribe" }));
+        const framed = encodeFrame(CONTROL_CHANNEL_ID, FRAME_TYPE.DATA, jsonBytes);
+        sock.send(transport.encrypt(framed));
         return;
       }
 
@@ -195,9 +203,14 @@ export function subscribeRemoteEvents(
         fatalError(`decrypt failed: ${err?.message ?? err}`);
         return;
       }
+      // v2 framing: strip the channel frame, accept channel 0 only.
+      const decoded = decodeFrame(plaintext);
+      if (!decoded.ok || decoded.frame.channelId !== CONTROL_CHANNEL_ID) {
+        return;
+      }
       let inner: { type: string; [k: string]: unknown };
       try {
-        inner = JSON.parse(new TextDecoder().decode(plaintext));
+        inner = JSON.parse(new TextDecoder().decode(decoded.frame.payload));
       } catch {
         return;
       }
@@ -378,8 +391,10 @@ export function subscribePublicRemoteEvents(
         transport = new Transport(handshake.split());
         handshake = null;
         attempts = 0;
-        const request = JSON.stringify({ type: "events_subscribe" });
-        sock.send(transport.encrypt(new TextEncoder().encode(request)));
+        // v2 framing: channel-0 DATA frame.
+        const jsonBytes = new TextEncoder().encode(JSON.stringify({ type: "events_subscribe" }));
+        const framed = encodeFrame(CONTROL_CHANNEL_ID, FRAME_TYPE.DATA, jsonBytes);
+        sock.send(transport.encrypt(framed));
         return;
       }
 
@@ -391,9 +406,13 @@ export function subscribePublicRemoteEvents(
         fatalError(`decrypt failed: ${err?.message ?? err}`);
         return;
       }
+      const decoded = decodeFrame(plaintext);
+      if (!decoded.ok || decoded.frame.channelId !== CONTROL_CHANNEL_ID) {
+        return;
+      }
       let inner: { type: string; [k: string]: unknown };
       try {
-        inner = JSON.parse(new TextDecoder().decode(plaintext));
+        inner = JSON.parse(new TextDecoder().decode(decoded.frame.payload));
       } catch {
         return;
       }
