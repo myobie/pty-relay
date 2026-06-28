@@ -2,6 +2,7 @@ import sodium from "libsodium-wrappers-sumo";
 import {
   loadKnownHosts,
   isPublicHost,
+  isSshHost,
   type KnownHost,
 } from "./known-hosts.ts";
 import { loadPublicAccount } from "../storage/public-account.ts";
@@ -16,7 +17,37 @@ import { log } from "../log.ts";
  */
 export type ResolvedHost =
   | { kind: "self"; label: string; url: string }
-  | { kind: "public"; label: string; target: PublicTarget; role?: "daemon" | "client" };
+  | { kind: "public"; label: string; target: PublicTarget; role?: "daemon" | "client" }
+  | { kind: "ssh"; label: string; sshUrl: string };
+
+/**
+ * Subcommands that already handle public-relay hosts inline (peek,
+ * send, tag, events, connect) call this on the non-public branch to
+ * narrow off the `ssh` case with a clear "not supported via ssh yet"
+ * error. Brief-010 phase 1 wires only `ls` for ssh peers; the rest
+ * are mechanical follow-ups but they don't ship in the first slice.
+ */
+export function requireRelayHost(
+  resolved: ResolvedHost,
+  subcommand: string,
+): { kind: "self"; label: string; url: string } {
+  if (resolved.kind === "ssh") {
+    throw new Error(
+      `${subcommand} doesn't yet support ssh:// peers. ` +
+        `For now, run \`ssh ${labelHostHint(resolved.sshUrl)} pty ${subcommand} …\` directly.`,
+    );
+  }
+  if (resolved.kind === "public") {
+    // Defense — callers should branch on `public` themselves; if they
+    // didn't, this is a clearer error than a downstream type cast.
+    throw new Error(`${subcommand} for public-relay peers must be handled separately`);
+  }
+  return resolved;
+}
+
+function labelHostHint(sshUrl: string): string {
+  return sshUrl.startsWith("ssh://") ? sshUrl.slice("ssh://".length) : sshUrl;
+}
 
 /**
  * Resolve a `pty-relay <cmd> <host-label>` argument to either a token
@@ -40,6 +71,11 @@ export async function resolveHost(
     throw new Error(
       `No known host "${label}". Run \`pty-relay ls\` to list hosts.`
     );
+  }
+
+  if (isSshHost(host)) {
+    log("hosts", "resolved ssh", { label, sshUrl: host.sshUrl });
+    return { kind: "ssh", label, sshUrl: host.sshUrl };
   }
 
   if (!isPublicHost(host)) {

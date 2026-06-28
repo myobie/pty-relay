@@ -1,11 +1,16 @@
 import { matchesAllTags } from "@myobie/pty/client";
 import { ready } from "../crypto/index.ts";
-import { loadKnownHosts, isPublicHost } from "../relay/known-hosts.ts";
+import {
+  loadKnownHosts,
+  isPublicHost,
+  isSshHost,
+} from "../relay/known-hosts.ts";
 import {
   listRemoteSessions,
   listPublicRemoteSessions,
   type RemoteSession,
 } from "../relay/relay-client.ts";
+import { listSshRemoteSessions } from "../relay/transport-ssh.ts";
 import { loadPublicAccount } from "../storage/public-account.ts";
 import { openSecretStore } from "../storage/bootstrap.ts";
 import sodium from "libsodium-wrappers-sumo";
@@ -91,6 +96,45 @@ export async function ls(
   const results: HostResult[] = await Promise.all(
     hosts.map(async (h) => {
       const hostStart = now();
+      if (isSshHost(h)) {
+        try {
+          const sshSessions = await listSshRemoteSessions(h.sshUrl);
+          const sessions = hasFilter
+            ? sshSessions.filter((s) => matchesAllTags(s.tags, filterTags))
+            : sshSessions;
+          log("cli", "ls host done", {
+            label: h.label,
+            kind: "ssh",
+            sessions: sessions.length,
+            ms: sinceMs(hostStart),
+          });
+          // ssh peers don't carry a `spawn_enabled` signal — pty list
+          // --json doesn't surface that today. Default to true: the
+          // operator has shell access, so they can spawn whatever they
+          // want regardless. Better UX than reporting a false zero.
+          return {
+            label: h.label,
+            url: h.sshUrl,
+            sessions,
+            spawn_enabled: true,
+            error: null,
+          };
+        } catch (err: any) {
+          log("cli", "ls host error", {
+            label: h.label,
+            kind: "ssh",
+            error: err?.message,
+            ms: sinceMs(hostStart),
+          });
+          return {
+            label: h.label,
+            url: h.sshUrl,
+            sessions: [],
+            spawn_enabled: false,
+            error: err.message || "ssh transport failed",
+          };
+        }
+      }
       if (isPublicHost(h)) {
         const url = `${h.relayUrl}@${h.publicKey.slice(0, 8)}`;
         if (!account) {

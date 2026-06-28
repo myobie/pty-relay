@@ -3,7 +3,7 @@ import {
   tagRemoteSession,
   tagPublicRemoteSession,
 } from "../relay/relay-client.ts";
-import { resolveHost } from "../relay/host-resolve.ts";
+import { resolveHost, requireRelayHost } from "../relay/host-resolve.ts";
 import { openSecretStore } from "../storage/bootstrap.ts";
 import { log } from "../log.ts";
 
@@ -43,7 +43,11 @@ export async function tag(
   const result =
     resolved.kind === "public"
       ? await tagPublicRemoteSession(resolved.target, session, tagOpts)
-      : await tagRemoteSession(resolved.url, session, tagOpts);
+      : await tagRemoteSession(
+          requireRelayHost(resolved, "tag").url,
+          session,
+          tagOpts,
+        );
 
   if (opts.json) {
     console.log(JSON.stringify(result.tags, null, 2));

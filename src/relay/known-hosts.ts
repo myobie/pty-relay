@@ -2,7 +2,7 @@ import type { SecretStore } from "../storage/secret-store.ts";
 import { log } from "../log.ts";
 
 /**
- * A saved relay host. Supports two flavors:
+ * A saved relay host. Supports three flavors:
  *
  *   self-hosted: `{label, url}` where url is the classic `#pk.secret`
  *     token-url form. Used by `pty-relay connect <token-url>` and saved
@@ -15,12 +15,17 @@ import { log } from "../log.ts";
  *     opens a `role=client_pair` WS against the relay, targeting
  *     `publicKey`.
  *
+ *   ssh: `{label, sshUrl}` where sshUrl is a `ssh://[user@]host[:port]`
+ *     URL. Used by `pty-relay add ssh://…` for ssh-reachable hosts that
+ *     don't need a relay daemon — `ls`/`peek`/`send`/etc. shell out to
+ *     `ssh <host> pty <cmd>` directly. See `docs/ssh-transport.md`.
+ *
  * `role` is informational for public-mode entries (daemon vs client) and
  * lets `ls` decide which rows to include in the session view.
  */
 export interface KnownHost {
   label: string;
-  /** Self-hosted `#pk.secret` URL. Omitted for public-relay hosts. */
+  /** Self-hosted `#pk.secret` URL. Omitted for non-self-hosted hosts. */
   url?: string;
   /** Public-relay origin, e.g. `http://localhost:4000`. */
   relayUrl?: string;
@@ -28,6 +33,10 @@ export interface KnownHost {
   publicKey?: string;
   /** Peer role on the account. */
   role?: "daemon" | "client";
+  /** `ssh://[user@]host[:port]` URL for ssh-reachable peers. The host is
+   *  reached by shelling out to `ssh <user@host> pty <op>`; no relay
+   *  daemon required. */
+  sshUrl?: string;
 }
 
 /** True iff this entry was registered via the public-relay flow. */
@@ -36,6 +45,11 @@ export function isPublicHost(h: KnownHost): h is KnownHost & {
   publicKey: string;
 } {
   return typeof h.relayUrl === "string" && typeof h.publicKey === "string";
+}
+
+/** True iff this entry is an ssh:// peer (no relay daemon). */
+export function isSshHost(h: KnownHost): h is KnownHost & { sshUrl: string } {
+  return typeof h.sshUrl === "string";
 }
 
 function parseHost(item: unknown): KnownHost | null {
@@ -48,9 +62,17 @@ function parseHost(item: unknown): KnownHost | null {
   if (typeof o.relayUrl === "string") host.relayUrl = o.relayUrl;
   if (typeof o.publicKey === "string") host.publicKey = o.publicKey;
   if (o.role === "daemon" || o.role === "client") host.role = o.role;
+  if (typeof o.sshUrl === "string") host.sshUrl = o.sshUrl;
 
-  // Reject entries that are neither self-hosted nor public-relay.
-  if (!host.url && !(host.relayUrl && host.publicKey)) return null;
+  // Reject entries that have no transport (neither self-hosted, public-
+  // relay, nor ssh).
+  if (
+    !host.url &&
+    !(host.relayUrl && host.publicKey) &&
+    !host.sshUrl
+  ) {
+    return null;
+  }
   return host;
 }
 
@@ -214,6 +236,29 @@ export async function savePublicKnownHost(
     relayUrl: host.relayUrl,
     role: host.role ?? "daemon",
     publicKeyPrefix: host.publicKey.slice(0, 8),
+  });
+}
+
+/**
+ * Save an ssh:// host: an ssh-reachable peer that runs `pty` locally.
+ * The sshUrl tuple is the unique key — re-saving the same sshUrl
+ * updates the label in place. Label collisions against unrelated
+ * entries get a sshUrl-derived suffix.
+ */
+export async function saveSshKnownHost(
+  host: { label: string; sshUrl: string },
+  store: SecretStore,
+): Promise<void> {
+  const existing = await loadKnownHosts(store);
+  const kept = existing.filter((h) => h.sshUrl !== host.sshUrl);
+  const usedLabels = new Set(kept.map((h) => h.label));
+  const finalLabel = pickUniqueLabel(host.label, host.sshUrl, usedLabels);
+  kept.push({ label: finalLabel, sshUrl: host.sshUrl });
+  await persist(kept, store);
+  log("hosts", "save ssh", {
+    label: finalLabel,
+    collidedWith: finalLabel !== host.label ? host.label : undefined,
+    sshUrl: host.sshUrl,
   });
 }
 
