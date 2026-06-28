@@ -56,7 +56,7 @@ export async function connect(
     if (passphrase && !process.env.PTY_RELAY_PASSPHRASE) {
       process.env.PTY_RELAY_PASSPHRASE = passphrase;
     }
-    const { resolveHost } = await import("../relay/host-resolve.ts");
+    const { resolveHost, requireRelayHost } = await import("../relay/host-resolve.ts");
     const resolved = await resolveHost(tokenUrlOrLabel, store);
     if (resolved.kind === "public") {
       const { connectPublic } = await import("./connect-public.ts");
@@ -67,8 +67,9 @@ export async function connect(
       });
       return;
     }
+    const relayHost = requireRelayHost(resolved, "connect");
     // Self-hosted label → look up the stored URL and fall through.
-    tokenUrlOrLabel = resolved.url;
+    tokenUrlOrLabel = relayHost.url;
   }
 
   const tokenUrl = tokenUrlOrLabel;

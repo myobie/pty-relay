@@ -56,6 +56,11 @@ Commands:
   events --json <host>                         Emit JSONL for scripting
   rename <old> <new>        Rename a saved known-host entry
   forget <host-label>       Remove a saved host
+  add ssh://[user@]host[:port] [--label <name>]
+                            Add an ssh-reachable peer to known-hosts.
+                            Probes with ssh BatchMode=yes + pty
+                            --version before saving so unreachable
+                            peers don't get recorded.
   connect [token-url]       Connect to a remote pty session (or list sessions)
   connect --spawn <n> --tag k=v  Spawn a session with tags (--tag repeatable)
   exec <target> <argv...>   Run a non-PTY command on a remote daemon (rsync's -e
@@ -501,6 +506,28 @@ async function main(): Promise<void> {
       const configDir = getFlag("--config-dir") ?? undefined;
       const { renameCommand } = await import("./commands/rename.ts");
       await renameCommand(oldLabel, newLabel, { configDir, passphraseFile });
+      break;
+    }
+
+    case "add": {
+      // Today only `ssh://[user@]host[:port]` is accepted (brief-010
+      // phase 1). Self-hosted hosts get added by the implicit
+      // post-handshake save in `connect`; public-relay hosts by the
+      // `server signin`/`server join` flows. `add` is the only path
+      // for ssh:// since there's no daemon to handshake with.
+      const target = args[1];
+      if (!target) {
+        console.error("Usage: pty-relay add ssh://[user@]host[:port] [--label <name>]");
+        process.exit(1);
+      }
+      const labelFlag = getFlag("--label");
+      const configDir = getFlag("--config-dir") ?? undefined;
+      const { addCommand } = await import("./commands/add.ts");
+      await addCommand(target, {
+        configDir,
+        passphraseFile,
+        label: labelFlag ?? undefined,
+      });
       break;
     }
 

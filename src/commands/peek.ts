@@ -3,7 +3,7 @@ import {
   peekRemoteSession,
   peekPublicRemoteSession,
 } from "../relay/relay-client.ts";
-import { resolveHost } from "../relay/host-resolve.ts";
+import { resolveHost, requireRelayHost } from "../relay/host-resolve.ts";
 import { openSecretStore } from "../storage/bootstrap.ts";
 import { log } from "../log.ts";
 
@@ -51,7 +51,11 @@ export async function peek(
     const result =
       resolved.kind === "public"
         ? await peekPublicRemoteSession(resolved.target, session, peekOpts)
-        : await peekRemoteSession(resolved.url, session, peekOpts);
+        : await peekRemoteSession(
+            requireRelayHost(resolved, "peek").url,
+            session,
+            peekOpts,
+          );
     // Write the screen to stdout as-is; callers can pipe or redirect.
     process.stdout.write(result.screen);
     // Add a trailing newline only if the screen didn't end with one, so

@@ -6,7 +6,7 @@ import {
   type SubscribeRemoteEventsOptions,
   type RemoteEventsSubscription,
 } from "../relay/events-client.ts";
-import { resolveHost } from "../relay/host-resolve.ts";
+import { resolveHost, requireRelayHost } from "../relay/host-resolve.ts";
 import { openSecretStore } from "../storage/bootstrap.ts";
 import { log } from "../log.ts";
 
@@ -97,10 +97,13 @@ export async function follow(hostLabel: string, opts: EventsOpts): Promise<void>
     },
   };
 
-  const subscription: RemoteEventsSubscription =
-    resolved.kind === "public"
-      ? subscribePublicRemoteEvents(resolved.target, subOpts)
-      : subscribeRemoteEvents(resolved.url, subOpts);
+  let subscription: RemoteEventsSubscription;
+  if (resolved.kind === "public") {
+    subscription = subscribePublicRemoteEvents(resolved.target, subOpts);
+  } else {
+    const relayHost = requireRelayHost(resolved, "events");
+    subscription = subscribeRemoteEvents(relayHost.url, subOpts);
+  }
 
   // Keep the process alive until Ctrl+C.
   process.on("SIGINT", () => {
