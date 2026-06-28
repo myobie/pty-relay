@@ -58,6 +58,11 @@ Commands:
   forget <host-label>       Remove a saved host
   connect [token-url]       Connect to a remote pty session (or list sessions)
   connect --spawn <n> --tag k=v  Spawn a session with tags (--tag repeatable)
+  exec <target> <argv...>   Run a non-PTY command on a remote daemon (rsync's -e
+                              transport; daemon must run with --allow-exec).
+                              Args after target are sent as the remote argv.
+  rsync [rsync-flags] src dst  Run rsync over an exec channel (real rsync is
+                              invoked under the hood; full rsync syntax works).
   local start [port]        Run a self-hosted relay (default: 8099)
   local --help              Show self-hosted subcommands
   set-name <label>          Set a custom name for this daemon
@@ -80,6 +85,11 @@ Options:
   --allow-new-sessions             Allow remote clients to start new pty sessions
   --skip-allow-new-sessions-confirmation  Don't prompt before enabling remote spawn
                                    (for non-interactive startup, e.g. a pty session)
+  --allow-exec                     Allow remote clients to spawn non-PTY processes
+                                   over "exec" channels (rsync / git). Allow-list
+                                   is compile-time; see src/relay/exec-allow-list.ts.
+  --skip-allow-exec-confirmation   Don't prompt before enabling --allow-exec
+                                   (for non-interactive startup)
   --auto-approve            Skip client approval (allow all connections)
   --tailscale               Enable Tailscale HTTPS via 'tailscale serve'
   --latency-stats           Enable web-UI latency telemetry. Adds a
@@ -145,6 +155,48 @@ function confirmAllowSpawn(): Promise<boolean> {
   });
 }
 
+/**
+ * Filter our own subcommand-level flags out of a remote-argv slice so
+ * `pty-relay exec <target> rsync --server …` doesn't pass `--config-dir`
+ * (or whatever) through to the remote process. Each name in `ours` is
+ * matched as either `--name <value>` (consumes the next arg) or
+ * `--name=value` (single arg).
+ */
+function stripOwnFlags(input: string[], ours: string[]): string[] {
+  const out: string[] = [];
+  const ownSet = new Set(ours);
+  for (let i = 0; i < input.length; i++) {
+    const a = input[i];
+    const eq = a.indexOf("=");
+    const name = eq >= 0 ? a.slice(0, eq) : a;
+    if (ownSet.has(name)) {
+      if (eq < 0 && i + 1 < input.length) i++; // skip the value
+      continue;
+    }
+    out.push(a);
+  }
+  return out;
+}
+
+function confirmAllowExec(): Promise<boolean> {
+  return new Promise((resolve) => {
+    process.stdout.write(
+      "\n" +
+      "WARNING: --allow-exec lets remote clients spawn non-PTY processes (rsync / git)\n" +
+      "over the encrypted relay channel. Compile-time allow-list (currently {rsync, git})\n" +
+      "limits which binaries can be invoked, but they run with this daemon's privileges.\n" +
+      "\n" +
+      "Enable remote exec? [y/N] "
+    );
+    process.stdin.resume();
+    process.stdin.setEncoding("utf8");
+    process.stdin.once("data", (data: string) => {
+      process.stdin.pause();
+      resolve(data.trim().toLowerCase() === "y");
+    });
+  });
+}
+
 async function main(): Promise<void> {
   const command = args[0];
 
@@ -198,6 +250,44 @@ async function main(): Promise<void> {
         configDir,
         passphraseFile,
       });
+      break;
+    }
+
+    case "exec": {
+      // Shape: pty-relay exec <target> <argv...>
+      // Designed for rsync's `-e` integration, so we DON'T require a
+      // `--` separator between flags and argv — everything after the
+      // target is the remote argv. Our own flags are config-only
+      // (--config-dir, --passphrase-file) and parsed via getFlag from
+      // anywhere in the line, so the remote argv stays clean.
+      const target = args[1];
+      if (!target) {
+        console.error("Usage: pty-relay exec <target> <argv...>");
+        process.exit(1);
+      }
+      const configDir = getFlag("--config-dir") ?? undefined;
+      // Strip out our own recognized flags + their values from the
+      // remote argv. Everything else is for the remote process.
+      const remoteArgv = stripOwnFlags(args.slice(2), [
+        "--config-dir",
+        "--passphrase-file",
+      ]);
+      const { execCommand } = await import("./commands/exec.ts");
+      await execCommand(target, remoteArgv, { configDir, passphraseFile });
+      break;
+    }
+
+    case "rsync": {
+      // Wrap real rsync with `-e "pty-relay exec"`. Everything after
+      // the subcommand is forwarded to rsync verbatim — the user gets
+      // full rsync syntax (flags, multiple sources, etc.).
+      const { rsyncCommand } = await import("./commands/rsync.ts");
+      const configDir = getFlag("--config-dir") ?? undefined;
+      const forwarded = stripOwnFlags(args.slice(1), [
+        "--config-dir",
+        "--passphrase-file",
+      ]);
+      await rsyncCommand(forwarded, { configDir, passphraseFile });
       break;
     }
 
@@ -1009,6 +1099,13 @@ async function dispatchLocal(): Promise<void> {
     const latencyStats = hasFlag("--latency-stats");
     const mosh = hasFlag("--mosh");
     const skipOsc8Confirm = hasFlag("--skip-osc8-confirm");
+    let allowExec = hasFlag("--allow-exec");
+    if (allowExec && !hasFlag("--skip-allow-exec-confirmation")) {
+      if (!(await confirmAllowExec())) {
+        console.log("Exec mode disabled.");
+        allowExec = false;
+      }
+    }
     // Default bind: loopback when --tailscale is set (tailscale serve
     // proxies tailnet -> 127.0.0.1:port). Otherwise leave undefined to
     // preserve the historical all-interfaces behavior for non-tailscale
@@ -1021,6 +1118,7 @@ async function dispatchLocal(): Promise<void> {
     const { start } = await import("./commands/start.ts");
     await start(port, configDir, {
       allowNewSessions,
+      allowExec,
       tailscale,
       autoApprove,
       passphraseFile,

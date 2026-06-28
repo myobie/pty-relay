@@ -8,6 +8,7 @@ import { PrimaryRelayConnection } from "../relay/primary-connection.ts";
 import { RelayConnection } from "../relay/relay-connection.ts";
 import { SessionBridge } from "../relay/session-bridge.ts";
 import { ChannelConnection } from "../relay/channel-connection.ts";
+import { handleChannelOpenControl } from "../relay/channel-open-handler.ts";
 import { ClientTracker } from "../relay/client-tracker.ts";
 import { EventFollower } from "@myobie/pty/client";
 import { execFileSync, execSync, spawn as childSpawn } from "node:child_process";
@@ -71,6 +72,10 @@ export async function start(
   configDir?: string,
   options?: {
     allowNewSessions?: boolean;
+    /** When true: clients can open `exec`-mode channels that spawn
+     *  non-PTY processes (rsync / git over relay). The argv allow-list
+     *  is enforced regardless. Off by default. */
+    allowExec?: boolean;
     tailscale?: boolean;
     autoApprove?: boolean;
     passphraseFile?: string;
@@ -333,9 +338,12 @@ export async function start(
           // events_* / spawn).
           if (handleControl(json)) return;
         },
-        // Phase 3b sends v1 RPCs only — channel-lifecycle messages
-        // (channel_open / _close / etc) arrive in phase 4.
-        onControl: () => {},
+        onControl: (msg) => {
+          if (!channel) return;
+          handleChannelOpenControl(channel, msg, {
+            allowExec: !!options?.allowExec,
+          });
+        },
         onFatal: (code, message) => {
           console.error(`Client ${clientId} protocol error: ${code} ${message}`);
           teardownClient(clientId);

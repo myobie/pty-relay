@@ -16,6 +16,7 @@ import {
 } from "../../relay/primary-connection.ts";
 import { RelayConnection } from "../../relay/relay-connection.ts";
 import { ChannelConnection } from "../../relay/channel-connection.ts";
+import { handleChannelOpenControl } from "../../relay/channel-open-handler.ts";
 import { SessionBridge } from "../../relay/session-bridge.ts";
 import { ClientTracker } from "../../relay/client-tracker.ts";
 import {
@@ -58,6 +59,10 @@ interface ClientSession {
 
 export interface StartOptions {
   allowNewSessions?: boolean;
+  /** When true: clients can open `exec`-mode channels that spawn
+   *  non-PTY processes (rsync / git over relay). The argv allow-list
+   *  is enforced regardless. Off by default. */
+  allowExec?: boolean;
   autoReconnectMs?: number;
   passphraseFile?: string;
 }
@@ -217,7 +222,12 @@ export async function startCommand(
             options
           );
         },
-        onControl: () => {},
+        onControl: (msg) => {
+          if (!channel) return;
+          handleChannelOpenControl(channel, msg, {
+            allowExec: !!options.allowExec,
+          });
+        },
         onFatal: (code, message) => {
           console.error(`Client ${clientId} protocol error: ${code} ${message}`);
           teardownClient(clientId);

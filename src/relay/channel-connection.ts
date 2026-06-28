@@ -87,6 +87,14 @@ export class ChannelConnection {
     );
   }
 
+  /** Generic per-channel-id DATA frame — used by exec channels (and any
+   *  future channel mode that allocates its own channel id) for
+   *  outbound payloads. Pty bridge keeps using `sendBridgeData` to
+   *  pin its implicit channel. */
+  sendChannelData(channelId: number, payload: Uint8Array): void {
+    this.dispatcher.sendData(channelId, FRAME_TYPE.DATA, payload);
+  }
+
   /** Wire a SessionBridge (or another ChannelHandler) onto the single
    *  pty channel. Idempotent on the same handler; throws on a different
    *  handler for an already-open id. */
