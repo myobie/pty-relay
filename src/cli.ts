@@ -1037,12 +1037,19 @@ async function dispatchLocal(): Promise<void> {
   if (subcommand === "status") {
     const configDir = getFlag("--config-dir") ?? undefined;
     const passphraseFile = getFlag("--passphrase-file") ?? undefined;
+    const portArg = getFlag("--port");
+    const port = portArg ? parseInt(portArg, 10) : undefined;
+    if (portArg && !Number.isFinite(port)) {
+      console.error(`Invalid --port value: ${portArg}`);
+      process.exit(1);
+    }
     const { localStatusCommand } = await import("./commands/local/status.ts");
     await localStatusCommand({
       json: hasFlag("--json"),
       showToken: hasFlag("--show-token"),
       configDir,
       passphraseFile,
+      port,
     });
     return;
   }
@@ -1084,6 +1091,11 @@ Subcommands:
                                    approved-client count. Prints the
                                    token URL only with --show-token
                                    (fragment contains auth material).
+  status --port <N>               Probe the given port for daemon
+                                   liveness (default: 8099). Reports
+                                   "running on port N" even when the
+                                   pid file is stale (supervisor-
+                                   respawned daemons).
   reset [--force]                 Wipe just self-hosted daemon state
                                    (config, clients, daemon.pid).
                                    Preserves public-relay enrollment
