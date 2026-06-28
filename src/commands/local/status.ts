@@ -1,6 +1,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import * as os from "node:os";
+import * as net from "node:net";
 import { log } from "../../log.ts";
 import { defaultConfigDir, openSecretStore } from "../../storage/bootstrap.ts";
 import { loadLabel } from "../../relay/config.ts";
@@ -31,7 +32,16 @@ export interface LocalStatusOpts {
   showToken?: boolean;
   configDir?: string;
   passphraseFile?: string;
+  /** TCP port to probe when checking daemon liveness. Defaults to
+   *  8099 (the documented `local start` default). Override when the
+   *  operator started the daemon on a non-default port — `status`
+   *  doesn't otherwise know which port was passed. */
+  port?: number;
 }
+
+/** Default port used by `pty-relay local start` and probed by `status`
+ *  when no port is supplied. Kept in sync with `cli.ts`'s usage text. */
+const DEFAULT_RELAY_PORT = 8099;
 
 export async function localStatusCommand(opts: LocalStatusOpts): Promise<void> {
   await ready();
@@ -89,7 +99,8 @@ export async function localStatusCommand(opts: LocalStatusOpts): Promise<void> {
   }
 
   const label = (await loadLabel(store)) || os.hostname();
-  const daemonInfo = probeDaemon(dir);
+  const probePort = opts.port ?? DEFAULT_RELAY_PORT;
+  const daemonInfo = await probeDaemon(dir, probePort);
   const clientStats = await loadClientStats(store);
   const pubKeyB64 = config
     ? sodium.to_base64(config.publicKey, sodium.base64_variants.URLSAFE_NO_PADDING)
@@ -130,8 +141,16 @@ export async function localStatusCommand(opts: LocalStatusOpts): Promise<void> {
   }
   if (daemonInfo.running) {
     console.log(`  Daemon:      running (pid ${daemonInfo.pid})`);
+  } else if (daemonInfo.portListening) {
+    // The PID file is stale or absent BUT something is listening on
+    // the relay port. Common cause: the daemon was respawned by a
+    // supervisor (`pty up`, systemd, etc.) without re-running
+    // `pty-relay local start`, OR the previous daemon died hard before
+    // cleanup. The pid we have (if any) is no longer authoritative.
+    const staleNote = daemonInfo.pid !== null ? ` (recorded pid ${daemonInfo.pid} is stale)` : "";
+    console.log(`  Daemon:      running on port ${probePort}${staleNote}`);
   } else if (daemonInfo.pid !== null) {
-    console.log(`  Daemon:      stale pid ${daemonInfo.pid} (process not found)`);
+    console.log(`  Daemon:      stale pid ${daemonInfo.pid} (process not found, port ${probePort} not listening)`);
   } else {
     console.log(`  Daemon:      not running`);
   }
@@ -153,25 +172,87 @@ export async function localStatusCommand(opts: LocalStatusOpts): Promise<void> {
 }
 
 interface DaemonProbe {
+  /** PID read from `daemon.pid`, if the file exists and parses. */
   pid: number | null;
+  /** True iff `process.kill(pid, 0)` succeeded — the pid points at a
+   *  live process. Not authoritative on its own: a supervisor may have
+   *  respawned the daemon after a hard crash without rewriting the
+   *  pid file, leaving the file stale even though the daemon is up. */
   running: boolean;
+  /** True iff a TCP connect to the relay port succeeded — something is
+   *  bound there. Use this in combination with `running` to decide
+   *  the real liveness state. (`running` true + `portListening` true
+   *  = normal. `portListening` true + `running` false = supervised
+   *  respawn / stale pid. Both false = down.) */
+  portListening: boolean;
 }
 
-function probeDaemon(configDir: string): DaemonProbe {
+export async function probeDaemon(configDir: string, port: number): Promise<DaemonProbe> {
+  const pid = readDaemonPid(configDir);
+  const running = pid !== null && isProcessAlive(pid);
+  const portListening = await isPortListening("127.0.0.1", port);
+  return { pid, running, portListening };
+}
+
+function readDaemonPid(configDir: string): number | null {
   const pidPath = path.join(configDir, "daemon.pid");
-  if (!fs.existsSync(pidPath)) return { pid: null, running: false };
+  if (!fs.existsSync(pidPath)) return null;
   try {
-    const pid = parseInt(fs.readFileSync(pidPath, "utf-8").trim(), 10);
-    if (!isFinite(pid)) return { pid: null, running: false };
-    try {
-      process.kill(pid, 0);
-      return { pid, running: true };
-    } catch {
-      return { pid, running: false };
-    }
+    const raw = fs.readFileSync(pidPath, "utf-8").trim();
+    const pid = parseInt(raw, 10);
+    return isFinite(pid) ? pid : null;
   } catch {
-    return { pid: null, running: false };
+    return null;
   }
+}
+
+function isProcessAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Best-effort TCP listen probe. Connects to `host:port` with a tight
+ * timeout. Returns true iff the connection completes — anything
+ * else (refused, no route, timeout, DNS fail) is treated as "no one
+ * listening." We don't try to speak the relay protocol; the goal is
+ * just "is something bound here that LOOKS like our daemon."
+ *
+ * Loopback only — we don't probe external interfaces because we
+ * have no idea what's running on the operator's network.
+ */
+function isPortListening(host: string, port: number): Promise<boolean> {
+  return new Promise<boolean>((resolve) => {
+    let settled = false;
+    const settle = (v: boolean): void => {
+      if (settled) return;
+      settled = true;
+      resolve(v);
+    };
+    try {
+      const socket = new net.Socket();
+      const timeout = setTimeout(() => {
+        try { socket.destroy(); } catch {}
+        settle(false);
+      }, 500);
+      socket.once("connect", () => {
+        clearTimeout(timeout);
+        try { socket.end(); } catch {}
+        settle(true);
+      });
+      socket.once("error", () => {
+        clearTimeout(timeout);
+        settle(false);
+      });
+      socket.connect(port, host);
+    } catch {
+      settle(false);
+    }
+  });
 }
 
 interface ClientStats {
