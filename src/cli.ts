@@ -77,6 +77,9 @@ Commands:
   clients revoke <id> [-y]  Revoke a client token (prompts for y/N)
   clients invite [--label]  Generate a pre-approved invite URL
   doctor                    Print environment info for troubleshooting
+  psk-gen                   Print a fresh 32-byte PSK (43-char URL-safe-base64
+                              -no-padding) to stdout. Use as --psk-file
+                              contents or PTY_RELAY_PSK env value.
   server                    Public-relay account management (signin, mint, etc.)
   server --help             Show public-relay subcommands
   client signin --email <addr>  Register this device as an account-wide client
@@ -86,6 +89,13 @@ Commands:
 Options:
   --config-dir <dir>        Config directory (default: ~/.local/state/pty/relay)
   --passphrase-file <path>  Read passphrase from file (non-interactive)
+  --psk-file <path>         Load a 32-byte PSK from <path> (43-char
+                              URL-safe-base64-no-padding, one line). When set,
+                              'local start' requires Noise_NKpsk2 from every
+                              client; 'connect' opts the client into NKpsk2
+                              against a PSK-required relay. Generate with
+                              'pty-relay psk-gen'. Also honored via
+                              PTY_RELAY_PSK env (the file wins).
   --backend <b>             Storage backend for init: keychain|passphrase
   --allow-new-sessions             Allow remote clients to start new pty sessions
   --skip-allow-new-sessions-confirmation  Don't prompt before enabling remote spawn
@@ -234,6 +244,11 @@ async function main(): Promise<void> {
   // Global --passphrase-file flag
   const passphraseFile = getFlag("--passphrase-file") ?? undefined;
 
+  // Global --psk-file flag (also honored via PTY_RELAY_PSK env).
+  // Plumbed into local start (responder side) and connect (initiator
+  // side); other subcommands ignore it.
+  const pskFile = getFlag("--psk-file") ?? undefined;
+
   switch (command) {
     case "connect": {
       const tokenUrlOrLabel = args[1];
@@ -254,6 +269,7 @@ async function main(): Promise<void> {
         session: sessionName ?? undefined,
         configDir,
         passphraseFile,
+        pskFile,
       });
       break;
     }
@@ -681,6 +697,18 @@ async function main(): Promise<void> {
 
     case "local": {
       await dispatchLocal();
+      break;
+    }
+
+    case "psk-gen": {
+      // Print a fresh 32-byte PSK to stdout as 43-char URL-safe-base64.
+      // Output is the bare base64 string — no banner, no newline-fence
+      // — so `pty-relay psk-gen > /etc/pty-relay/psk` and `pty-relay
+      // psk-gen | tr -d '\n' | pbcopy` both behave correctly.
+      const { ready } = await import("./crypto/index.ts");
+      await ready();
+      const { generatePsk } = await import("./relay/psk.ts");
+      process.stdout.write(generatePsk() + "\n");
       break;
     }
 
@@ -1114,6 +1142,7 @@ async function dispatchLocal(): Promise<void> {
     const port = parseInt(portArg || "8099", 10);
     const configDir = getFlag("--config-dir") ?? undefined;
     const passphraseFile = getFlag("--passphrase-file") ?? undefined;
+    const pskFile = getFlag("--psk-file") ?? undefined;
     let allowNewSessions = hasFlag("--allow-new-sessions");
     if (allowNewSessions && !hasFlag("--skip-allow-new-sessions-confirmation")) {
       if (!(await confirmAllowSpawn())) {
@@ -1149,6 +1178,7 @@ async function dispatchLocal(): Promise<void> {
       tailscale,
       autoApprove,
       passphraseFile,
+      pskFile,
       bind,
       latencyStats,
       mosh,
@@ -1208,6 +1238,11 @@ Subcommands:
   start --bind <addr>             Bind address (default: all interfaces;
                                    127.0.0.1 when --tailscale is set)
   start --auto-approve            Skip the per-client approval TUI
+  start --psk-file <path>         Require Noise_NKpsk2 from every client and
+                                   load the 32-byte PSK from <path> (43-char
+                                   URL-safe-base64-no-padding). Generate one
+                                   with 'pty-relay psk-gen'. Honored from
+                                   PTY_RELAY_PSK if the flag is omitted.
   start --allow-new-sessions      Let remote clients spawn new pty sessions
                                    (prompts unless --skip-allow-new-sessions-confirmation)
   start -d [--name <label>]       Run detached in a 'pty' session
