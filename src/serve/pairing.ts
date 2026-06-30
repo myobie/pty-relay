@@ -5,6 +5,9 @@ import { log } from "../log.ts";
 export interface ClientEntry {
   client: WebSocket;
   daemon: WebSocket | null; // per-client daemon socket, null while waiting
+  /** Captured from `?psk_required=1` at WS upgrade. Echoed into the
+   *  `paired` frame so the daemon picks NKpsk2 instead of NK. */
+  pskRequired: boolean;
 }
 
 interface PrimaryEntry {
@@ -115,6 +118,7 @@ export class PairingRegistry {
       remoteAddr?: string | null;
       userAgent?: string | null;
       origin?: string | null;
+      pskRequired?: boolean;
     }
   ): string | null {
     const entry = this.entries.get(secretHash);
@@ -125,6 +129,7 @@ export class PairingRegistry {
     const clientEntry: ClientEntry = {
       client: ws,
       daemon: null,
+      pskRequired: !!meta?.pskRequired,
     };
 
     entry.clients.set(clientId, clientEntry);
@@ -137,6 +142,9 @@ export class PairingRegistry {
       };
       if (clientToken) {
         msg.client_token = clientToken;
+      }
+      if (clientEntry.pskRequired) {
+        msg.psk_required = true;
       }
       if (meta && (meta.remoteAddr || meta.userAgent || meta.origin)) {
         msg.meta = {
@@ -201,8 +209,14 @@ export class PairingRegistry {
 
     clientEntry.daemon = ws;
 
-    // Send paired to both sides
-    const paired = JSON.stringify({ type: "paired" });
+    // Send paired to both sides. When the client signaled
+    // `?psk_required=1` at the WS upgrade, propagate that into the
+    // metadata both peers see so they negotiate NKpsk2 in lockstep.
+    const pairedPayload: Record<string, unknown> = { type: "paired" };
+    if (clientEntry.pskRequired) {
+      pairedPayload.noise_pattern = "NKpsk2";
+    }
+    const paired = JSON.stringify(pairedPayload);
     try {
       clientEntry.client.send(paired);
     } catch {

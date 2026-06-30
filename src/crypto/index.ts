@@ -32,6 +32,8 @@ export {
   Handshake,
   NK,
   KK,
+  NKpsk2,
+  PSK_LEN,
 } from "./noise.ts";
 export type {
   Pattern,

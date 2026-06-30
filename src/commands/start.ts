@@ -10,6 +10,7 @@ import { SessionBridge } from "../relay/session-bridge.ts";
 import { ChannelConnection } from "../relay/channel-connection.ts";
 import { handleChannelOpenControl } from "../relay/channel-open-handler.ts";
 import { ClientTracker } from "../relay/client-tracker.ts";
+import { loadPsk } from "../relay/psk.ts";
 import { EventFollower } from "@myobie/pty/client";
 import { execFileSync, execSync, spawn as childSpawn } from "node:child_process";
 import type { Config } from "../crypto/index.ts";
@@ -83,6 +84,11 @@ export async function start(
     tailscale?: boolean;
     autoApprove?: boolean;
     passphraseFile?: string;
+    /** Path to a `--psk-file`. When set, every per-client connection
+     *  requires Noise_NKpsk2 with this PSK; plain-NK clients are
+     *  refused. Honored from `PTY_RELAY_PSK` if this option is
+     *  omitted. */
+    pskFile?: string;
     bind?: string;
     /** When true: web UI runs the latency tracker, shows the
      *  toolbar indicator + Stats button, and posts reports to the
@@ -125,6 +131,14 @@ export async function start(
   );
   const label = (await loadLabel(store)) || os.hostname();
   const autoApprove = options?.autoApprove ?? false;
+
+  // PSK (Noise_NKpsk2) is opt-in. When configured, every per-client
+  // RelayConnection enforces NKpsk2 and refuses plain-NK clients;
+  // when null, the daemon stays in NK-only mode. See docs/psk-auth.md.
+  const preSharedKey = await loadPsk({ pskFile: options?.pskFile });
+  if (preSharedKey) {
+    console.log("PSK authentication enabled (Noise_NKpsk2).");
+  }
 
   // Start the relay server, serving the web UI from the bundled browser client
   const htmlPath = path.resolve(import.meta.dirname, "../../browser/dist/index.html");
@@ -316,6 +330,7 @@ export async function start(
         console.log(`Client ${clientId} paired.`);
       },
 
+
       onHandshakeComplete: () => {
         // If the client was approved with a token, send it inside the
         // encrypted tunnel — channel-0 framed v1 app message.
@@ -343,6 +358,28 @@ export async function start(
       onClose: () => {
         teardownClient(clientId);
       },
+    }, {
+      preSharedKey: preSharedKey ?? undefined,
+      // Per-attempt audit log line. Structured INFO; one line per
+      // handshake outcome (ok|fail). Matches docs/psk-auth.md §
+      // "Audit logging": no IP-blocklist, no rate-limit, just a
+      // record an operator can `grep psk_auth` on. Skipped entirely
+      // when no PSK is configured.
+      onPskAuthAttempt: preSharedKey
+        ? (event) => {
+            log("psk-auth", "attempt", {
+              clientId,
+              fingerprint: event.fingerprint,
+              outcome: event.outcome,
+              reason: event.reason,
+            });
+            if (event.outcome === "fail") {
+              console.warn(
+                `[psk-auth] client ${clientId} REJECTED — ${event.reason ?? "unknown"}`
+              );
+            }
+          }
+        : undefined,
     });
 
     channel = new ChannelConnection(

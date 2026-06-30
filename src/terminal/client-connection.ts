@@ -28,12 +28,17 @@ export interface ClientRelayEvents {
  * of a ping, the connection is terminated immediately.
  */
 /** Noise role configuration. NK only supplies the daemon pubkey; KK
- *  additionally supplies the client's own static keypair. */
+ *  additionally supplies the client's own static keypair; NKpsk2
+ *  additionally supplies a 32-byte pre-shared key. */
 export interface ClientNoise {
   pattern: Pattern;
   daemonPublicKey: Uint8Array;
-  /** Required for KK; must be omitted for NK. */
+  /** Required for KK; must be omitted for NK / NKpsk2. */
   clientStaticKeys?: { publicKey: Uint8Array; privateKey: Uint8Array };
+  /** Required when `pattern` is NKpsk2; must be omitted for NK / KK.
+   *  Loaded by the caller via `loadPsk()` from `--psk-file` or
+   *  `PTY_RELAY_PSK`. */
+  preSharedKey?: Uint8Array;
 }
 
 export class ClientRelayConnection {
@@ -258,6 +263,7 @@ export class ClientRelayConnection {
       initiator: true,
       remoteStaticPublicKey: this.noise.daemonPublicKey,
       staticKeys: this.noise.clientStaticKeys,
+      preSharedKey: this.noise.preSharedKey,
     });
     const hello = this.handshake.writeMessage();
     this.ws!.send(hello);

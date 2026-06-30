@@ -181,11 +181,12 @@ export function createRelayServer(
       const origin =
         typeof originHeader === "string" ? originHeader : null;
 
+      const pskRequired = url.searchParams.get("psk_required") === "1";
       const id = registry.registerClient(
         secretHash,
         ws,
         clientToken ?? undefined,
-        { remoteAddr, userAgent, origin }
+        { remoteAddr, userAgent, origin, pskRequired }
       );
       log("pairing", "registerClient", {
         assigned: id,

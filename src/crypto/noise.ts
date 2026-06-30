@@ -120,6 +120,27 @@ function hkdf2(
   return [output1, output2];
 }
 
+/** Three-output HKDF for `MixKeyAndHash(input_key_material)` per Noise
+ *  § 5.2.2. The first output replaces ck, the second is hashed in via
+ *  mixHash, the third is the new cipher key. */
+function hkdf3(
+  chainingKey: Uint8Array,
+  inputKeyMaterial: Uint8Array
+): [Uint8Array, Uint8Array, Uint8Array] {
+  const tempKey = hmacBlake2b(chainingKey, inputKeyMaterial);
+  const output1 = hmacBlake2b(tempKey, new Uint8Array([0x01]));
+  const input2 = new Uint8Array(output1.length + 1);
+  input2.set(output1);
+  input2[output1.length] = 0x02;
+  const output2 = hmacBlake2b(tempKey, input2);
+  const input3 = new Uint8Array(output2.length + 1);
+  input3.set(output2);
+  input3[output2.length] = 0x03;
+  const output3 = hmacBlake2b(tempKey, input3);
+  sodium.memzero(tempKey);
+  return [output1, output2, output3];
+}
+
 // --- SymmetricState, Noise spec § 5.2 ---
 
 class SymmetricState {
@@ -152,6 +173,22 @@ class SymmetricState {
     this.ck = newCk;
     this.cipher = new CipherState(tempK.slice(0, KEY_LEN));
     sodium.memzero(oldCk);
+    sodium.memzero(tempK);
+    sodium.memzero(inputKeyMaterial);
+  }
+
+  /** MixKeyAndHash per Noise § 5.2.2. Used by the `psk` token: HKDF
+   *  the chaining key + PSK into three outputs, replace ck with the
+   *  first, mixHash the second, install the third as the new cipher
+   *  key. The PSK is zeroized after use. */
+  mixKeyAndHash(inputKeyMaterial: Uint8Array): void {
+    const oldCk = this.ck;
+    const [newCk, tempH, tempK] = hkdf3(this.ck, inputKeyMaterial);
+    this.ck = newCk;
+    this.mixHash(tempH);
+    this.cipher = new CipherState(tempK.slice(0, KEY_LEN));
+    sodium.memzero(oldCk);
+    sodium.memzero(tempH);
     sodium.memzero(tempK);
     sodium.memzero(inputKeyMaterial);
   }
@@ -195,16 +232,17 @@ class SymmetricState {
 /**
  * Tokens the handshake engine processes during a MESSAGE. `e` generates
  * and transmits an ephemeral; the four DH tokens mix scalar-mult output
- * into the chaining key. Each message's payload (empty for our usage)
- * is encryptAndHash'd at the end.
+ * into the chaining key. `psk` mixes a 32-byte pre-shared key via
+ * MixKeyAndHash (Noise § 9). Each message's payload (empty for our
+ * usage) is encryptAndHash'd at the end.
  *
  * Patterns like IK / XX also use an `s` token to TRANSMIT a static
- * pubkey in-band. NK and KK — the only patterns we currently ship —
+ * pubkey in-band. NK / KK / NKpsk2 — the patterns we currently ship —
  * pre-share statics via the constructor, so no `s` transmission
  * happens and the engine doesn't handle it. If we ever add such a
  * pattern we'll widen this type + add the token case alongside.
  */
-export type Token = "e" | "ee" | "es" | "se" | "ss";
+export type Token = "e" | "ee" | "es" | "se" | "ss" | "psk";
 
 /** Tokens a PRE-MESSAGE references. Pre-message `s` means "this side's
  *  static is known to the peer in advance" — it's mixed into the
@@ -245,6 +283,28 @@ export const KK: Pattern = {
   ],
 };
 
+/**
+ * NK with a 32-byte PSK mixed at message 2 (after `ee`). Adds a second
+ * authenticator on top of NK's pubkey-pinning: the responder must hold
+ * BOTH the matching static keypair AND the matching PSK; the initiator
+ * must hold BOTH the responder's static pubkey AND the PSK. PSK is
+ * pulled from `HandshakeOptions.preSharedKey` — required + must be
+ * exactly 32 bytes.
+ *
+ * Choice of psk2 (vs psk0 / psk1): see `docs/psk-auth.md` § 2. psk2
+ * means the responder authenticates the initiator on msg 2 with the
+ * PSK as the gate, which matches our "PSK is the headless-friendly
+ * auth gate" use case.
+ */
+export const NKpsk2: Pattern = {
+  name: "Noise_NKpsk2_25519_ChaChaPoly_BLAKE2b",
+  preMessages: { initiator: [], responder: ["s"] },
+  messages: [
+    ["e", "es"],          // -> e, es
+    ["e", "ee", "psk"],   // <- e, ee, psk
+  ],
+};
+
 // --- Handshake engine ---
 
 /** Keys a handshake party may hold. Which are required depends on the
@@ -259,6 +319,10 @@ export interface HandshakeKeys {
 export interface HandshakeOptions extends HandshakeKeys {
   pattern: Pattern;
   initiator: boolean;
+  /** Required (+ exactly 32 bytes) when `pattern.messages` contains a
+   *  `psk` token; rejected otherwise. The engine consumes a defensive
+   *  copy and zeroizes it when the token is processed. */
+  preSharedKey?: Uint8Array;
 }
 
 /** Result of a completed handshake: one CipherState per direction. */
@@ -279,11 +343,18 @@ export interface HandshakeResult {
  * the transport CipherStates. Calling `writeMessage()` or
  * `readMessage()` after that throws.
  */
+/** Size, in bytes, of a Noise PSK (Noise spec § 9). */
+export const PSK_LEN = 32;
+
 export class Handshake {
   private readonly pattern: Pattern;
   private readonly initiator: boolean;
   private readonly s?: { publicKey: Uint8Array; privateKey: Uint8Array };
   private readonly rs?: Uint8Array;
+  /** Defensive copy of the PSK if the pattern uses a `psk` token.
+   *  Zeroized after the token is consumed during writeMessage /
+   *  readMessage. `null` when the pattern has no `psk` token. */
+  private psk: Uint8Array | null = null;
   private ss: SymmetricState;
   private e: { publicKey: Uint8Array; privateKey: Uint8Array } | null = null;
   private re: Uint8Array | null = null;
@@ -296,6 +367,32 @@ export class Handshake {
     this.rs = opts.remoteStaticPublicKey
       ? new Uint8Array(opts.remoteStaticPublicKey)
       : undefined;
+
+    // PSK validation. We reject obvious misconfigurations early so a
+    // mismatched call site can't silently pass a wrong-length key
+    // (which would only surface as a confusing AEAD failure later).
+    const patternUsesPsk = this.pattern.messages.some((tokens) =>
+      tokens.includes("psk"),
+    );
+    if (patternUsesPsk) {
+      if (!opts.preSharedKey) {
+        throw new Error(
+          `${this.pattern.name}: pattern includes "psk" token — pass preSharedKey`,
+        );
+      }
+      if (opts.preSharedKey.length !== PSK_LEN) {
+        throw new Error(
+          `${this.pattern.name}: preSharedKey must be exactly ${PSK_LEN} bytes (got ${opts.preSharedKey.length})`,
+        );
+      }
+      // Defensive copy so the caller can zeroize their copy whenever
+      // they want without breaking us mid-handshake.
+      this.psk = new Uint8Array(opts.preSharedKey);
+    } else if (opts.preSharedKey) {
+      throw new Error(
+        `${this.pattern.name}: pattern has no "psk" token — do NOT pass preSharedKey`,
+      );
+    }
 
     // Validate that the keys the pattern's pre-messages demand are
     // actually supplied. We do this at construction time so a
@@ -367,6 +464,8 @@ export class Handshake {
         this.e = { publicKey: kp.publicKey, privateKey: kp.privateKey };
         this.ss.mixHash(this.e.publicKey);
         parts.push(new Uint8Array(this.e.publicKey));
+      } else if (token === "psk") {
+        this.mixPsk();
       } else {
         this.mixDh(token);
       }
@@ -397,6 +496,8 @@ export class Handshake {
         this.re = new Uint8Array(message.subarray(offset, offset + DH_LEN));
         offset += DH_LEN;
         this.ss.mixHash(this.re);
+      } else if (token === "psk") {
+        this.mixPsk();
       } else {
         this.mixDh(token);
       }
@@ -419,17 +520,39 @@ export class Handshake {
 
     // Best-effort zeroization of any keys we still hold. Ephemeral
     // privates should already be gone from mixDh; static privates are
-    // caller-owned so we leave them alone.
+    // caller-owned so we leave them alone. If `psk` was loaded but
+    // never consumed (e.g. an abandoned mid-handshake split), zeroize
+    // it now so it doesn't linger.
     if (this.e) {
       sodium.memzero(this.e.privateKey);
       this.e = null;
     }
     this.re = null;
+    if (this.psk) {
+      sodium.memzero(this.psk);
+      this.psk = null;
+    }
 
     const [c1, c2] = this.ss.split();
     return this.initiator
       ? { send: c1, recv: c2 }
       : { send: c2, recv: c1 };
+  }
+
+  /** Process the `psk` token: MixKeyAndHash(psk), then zeroize our
+   *  defensive copy. Each psk token in a pattern consumes the PSK
+   *  exactly once — the engine refuses to process a second psk token
+   *  in the same handshake (the patterns we ship never repeat one). */
+  private mixPsk(): void {
+    if (!this.psk) {
+      throw new Error('"psk" token but no PSK is loaded (already consumed?)');
+    }
+    // mixKeyAndHash zeroizes its argument, so the local zeroization
+    // here is redundant — but we explicitly drop the reference too so
+    // a second "psk" token in the same handshake fails clearly above.
+    const psk = this.psk;
+    this.psk = null;
+    this.ss.mixKeyAndHash(psk);
   }
 
   /** Process one DH token. Throws if the required key isn't available. */

@@ -7,15 +7,27 @@ import {
   getWebSocketUrl,
   createToken,
   NK,
+  NKpsk2,
+  type Pattern,
 } from "../crypto/index.ts";
 import type { ParsedToken } from "../crypto/index.ts";
 import { ClientRelayConnection } from "../terminal/client-connection.ts";
 import { Terminal } from "../terminal/terminal.ts";
 import { ChannelConnection } from "../relay/channel-connection.ts";
 import { saveKnownHost } from "../relay/known-hosts.ts";
+import { loadPsk } from "../relay/psk.ts";
 import type { SecretStore } from "../storage/secret-store.ts";
 import { openSecretStore } from "../storage/bootstrap.ts";
 import { log } from "../log.ts";
+
+/** Noise auth material chosen at connect-time. NK has no PSK; NKpsk2
+ *  carries one 32-byte pre-shared key supplied by --psk-file /
+ *  PTY_RELAY_PSK. Plumbed through attachSession → attemptConnect so
+ *  every reconnect uses the same material. */
+interface NoiseAuth {
+  pattern: Pattern;
+  preSharedKey?: Uint8Array;
+}
 
 // Reconnect constants
 const RECONNECT_INITIAL_MS = 1000;
@@ -32,6 +44,10 @@ export async function connect(
     session?: string;
     configDir?: string;
     passphraseFile?: string;
+    /** When set, route through Noise_NKpsk2 instead of NK and signal
+     *  `?psk_required=1` on the WS upgrade so the relay echoes the
+     *  pattern back to the daemon. Also honored from `PTY_RELAY_PSK`. */
+    pskFile?: string;
   }
 ): Promise<void> {
   await ready();
@@ -75,7 +91,19 @@ export async function connect(
   const tokenUrl = tokenUrlOrLabel;
   const parsed = parseToken(tokenUrl);
   const secretHash = computeSecretHash(parsed.secret);
-  const wsUrl = getWebSocketUrl(parsed.host, "client", secretHash, undefined, parsed.clientToken ?? undefined);
+
+  // Resolve PSK auth before building the WS URL — when configured we
+  // tack `?psk_required=1` on so the relay echoes `noise_pattern:
+  // "NKpsk2"` back to the daemon in the `paired` message. Both peers
+  // pick the pattern from the same signal.
+  const preSharedKey = await loadPsk({ pskFile: options?.pskFile });
+  const noiseAuth: NoiseAuth = preSharedKey
+    ? { pattern: NKpsk2, preSharedKey }
+    : { pattern: NK };
+  let wsUrl = getWebSocketUrl(parsed.host, "client", secretHash, undefined, parsed.clientToken ?? undefined);
+  if (preSharedKey) {
+    wsUrl += "&psk_required=1";
+  }
 
   const { store, passphrase } = await openSecretStore(options?.configDir, {
     interactive: true,
@@ -99,11 +127,11 @@ export async function connect(
 
   // If no session and no spawn, list sessions and re-exec with the chosen one
   if (!parsed.session && !options?.spawn) {
-    await listAndPick(wsUrl, parsed, tokenUrl, store);
+    await listAndPick(wsUrl, parsed, tokenUrl, store, noiseAuth);
     return;
   }
 
-  attachSession(wsUrl, parsed, store, options);
+  attachSession(wsUrl, parsed, store, noiseAuth, options);
 }
 
 /**
@@ -144,8 +172,9 @@ async function listAndPick(
   parsed: ReturnType<typeof parseToken>,
   tokenUrl: string,
   store: SecretStore,
+  noiseAuth: NoiseAuth,
 ): Promise<void> {
-  const sessions = await fetchSessions(wsUrl, parsed, store);
+  const sessions = await fetchSessions(wsUrl, parsed, store, noiseAuth);
 
   if (sessions.length === 0) {
     console.log("No running sessions.");
@@ -188,6 +217,7 @@ function fetchSessions(
   wsUrl: string,
   parsed: ReturnType<typeof parseToken>,
   store: SecretStore,
+  noiseAuth: NoiseAuth,
 ): Promise<Array<{ name: string; command?: string }>> {
   return new Promise((resolve, reject) => {
     const timeout = setTimeout(() => {
@@ -198,8 +228,9 @@ function fetchSessions(
     let channel: ChannelConnection | null = null;
 
     const connection = new ClientRelayConnection(wsUrl, {
-      pattern: NK,
+      pattern: noiseAuth.pattern,
       daemonPublicKey: parsed.publicKey,
+      preSharedKey: noiseAuth.preSharedKey,
     }, {
       onReady: () => {
         // Handshake done — daemon's pubkey verified by the NK pattern.
@@ -292,6 +323,7 @@ function attemptConnect(
   parsed: ParsedToken,
   store: SecretStore,
   session: string,
+  noiseAuth: NoiseAuth,
   options: {
     spawn?: string;
     cwd?: string;
@@ -322,8 +354,9 @@ function attemptConnect(
     }
 
     const connection = new ClientRelayConnection(wsUrl, {
-      pattern: NK,
+      pattern: noiseAuth.pattern,
       daemonPublicKey: parsed.publicKey,
+      preSharedKey: noiseAuth.preSharedKey,
     }, {
       onReady: () => {
         // Handshake done — daemon's pubkey verified by the NK pattern.
@@ -540,6 +573,7 @@ async function connectWithReconnect(
   parsed: ParsedToken,
   store: SecretStore,
   session: string,
+  noiseAuth: NoiseAuth,
   options: {
     spawn?: string;
     cwd?: string;
@@ -557,7 +591,7 @@ async function connectWithReconnect(
   // we only count actual attempts, and reset on successful connections.
 
   while (true) {
-    const reason = await attemptConnect(wsUrl, parsed, store, session, {
+    const reason = await attemptConnect(wsUrl, parsed, store, session, noiseAuth, {
       spawn: options.spawn,
       cwd: options.cwd,
       tags: options.tags,
@@ -631,14 +665,21 @@ async function connectWithReconnect(
  */
 export async function connectEmbedded(
   tokenUrl: string,
-  options: { spawn?: string; cwd?: string; store: SecretStore }
+  options: { spawn?: string; cwd?: string; store: SecretStore; pskFile?: string }
 ): Promise<ConnectResult> {
   await ready();
   log("cli", "connect embedded begin", { spawn: options.spawn, cwd: options.cwd });
 
   const parsed = parseToken(tokenUrl);
   const secretHash = computeSecretHash(parsed.secret);
-  const wsUrl = getWebSocketUrl(parsed.host, "client", secretHash, undefined, parsed.clientToken ?? undefined);
+  const preSharedKey = await loadPsk({ pskFile: options.pskFile });
+  const noiseAuth: NoiseAuth = preSharedKey
+    ? { pattern: NKpsk2, preSharedKey }
+    : { pattern: NK };
+  let wsUrl = getWebSocketUrl(parsed.host, "client", secretHash, undefined, parsed.clientToken ?? undefined);
+  if (preSharedKey) {
+    wsUrl += "&psk_required=1";
+  }
 
   // Known-host persistence happens in attemptConnect's `onReady`
   // callback below — after the Noise handshake confirms the daemon's
@@ -656,7 +697,7 @@ export async function connectEmbedded(
   }
   process.on("SIGINT", sigintHandler);
 
-  const result = await connectWithReconnect(wsUrl, parsed, options.store, session, {
+  const result = await connectWithReconnect(wsUrl, parsed, options.store, session, noiseAuth, {
     spawn: options.spawn,
     cwd: options.cwd,
     onStatus: (msg: string) => {
@@ -678,6 +719,7 @@ function attachSession(
   wsUrl: string,
   parsed: ReturnType<typeof parseToken>,
   store: SecretStore,
+  noiseAuth: NoiseAuth,
   options?: { spawn?: string; cwd?: string; tags?: Record<string, string>; configDir?: string },
 ): void {
   const session = options?.spawn || parsed.session!;
@@ -687,7 +729,7 @@ function attachSession(
     process.exit(0);
   });
 
-  connectWithReconnect(wsUrl, parsed, store, session, {
+  connectWithReconnect(wsUrl, parsed, store, session, noiseAuth, {
     spawn: options?.spawn,
     cwd: options?.cwd,
     tags: options?.tags,

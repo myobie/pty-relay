@@ -4,9 +4,11 @@ import {
   Handshake,
   NK,
   KK,
+  NKpsk2,
   Transport,
   type Pattern,
 } from "../crypto/index.ts";
+import { pskFingerprint } from "./psk.ts";
 import type { Config } from "../crypto/index.ts";
 import { log, now, sinceMs, redactAuthQuery } from "../log.ts";
 
@@ -58,6 +60,11 @@ export function formatUpgradeRejection(status: number, body: string): string {
  *                                    anonymous, no registered key yet).
  *   - Only `client_public_key`    → client_pair       (KK; both sides
  *                                    are registered on the account).
+ *   - `noise_pattern: "NKpsk2"`   → self-hosted PSK pairing. Client
+ *                                    signaled `?psk_required=1` at
+ *                                    WS upgrade; daemon must hold the
+ *                                    matching PSK or it refuses to
+ *                                    handshake.
  *   - Neither                     → self-hosted paired (NK).
  */
 export interface PairedMeta {
@@ -68,6 +75,11 @@ export interface PairedMeta {
    *  Curve25519 Noise static via ed25519→curve25519 and feeds it into
    *  the KK handshake as `remoteStaticPublicKey`. Base64url. */
   client_public_key?: string;
+  /** Set by the relay when the client signaled `?psk_required=1` on
+   *  the WS upgrade. The daemon refuses to handshake unless it has a
+   *  matching PSK loaded. Self-hosted only — public-relay mode uses
+   *  the account auth model instead. */
+  noise_pattern?: "NKpsk2";
 }
 
 export interface RelayEvents {
@@ -94,6 +106,24 @@ export interface RelayEvents {
  * keypair (required for NK's responder pre-message and for KK's
  * `ss`/`es`/`se`).
  */
+/**
+ * Optional auth material a RelayConnection may carry. Today: a PSK for
+ * `Noise_NKpsk2`. The daemon loads this at startup from `--psk-file` /
+ * `PTY_RELAY_PSK` (see `src/relay/psk.ts`) and passes it to every
+ * per-client RelayConnection.
+ */
+export interface RelayAuth {
+  preSharedKey?: Uint8Array;
+  /** Optional callback invoked once per handshake outcome (success +
+   *  fail) when a PSK is in play. Lets the daemon emit a structured
+   *  audit log line per the design doc § "Audit logging". */
+  onPskAuthAttempt?: (event: {
+    outcome: "ok" | "fail";
+    fingerprint: string;
+    reason?: string;
+  }) => void;
+}
+
 export class RelayConnection {
   private ws: WebSocket | null = null;
   private transport: Transport | null = null;
@@ -101,13 +131,25 @@ export class RelayConnection {
   private config: Config;
   private wsUrlFactory: string | (() => string);
   private events: RelayEvents;
+  private auth: RelayAuth;
+  /** When the responder picked NKpsk2 in beginHandshake, this is the
+   *  PSK's fingerprint to log on success/failure. Cleared after
+   *  audit-emission so the success path doesn't double-log on a
+   *  subsequent reconnect. */
+  private pskAuthFingerprint: string | null = null;
   private state: "connecting" | "waiting" | "handshaking" | "ready" | "closed" =
     "connecting";
 
-  constructor(wsUrl: string | (() => string), config: Config, events: RelayEvents) {
+  constructor(
+    wsUrl: string | (() => string),
+    config: Config,
+    events: RelayEvents,
+    auth: RelayAuth = {},
+  ) {
     this.wsUrlFactory = wsUrl;
     this.config = config;
     this.events = events;
+    this.auth = auth;
   }
 
   connect(): void {
@@ -238,6 +280,8 @@ export class RelayConnection {
             typeof msg.pairing_hash_id === "string" ? msg.pairing_hash_id : undefined,
           client_public_key:
             typeof msg.client_public_key === "string" ? msg.client_public_key : undefined,
+          noise_pattern:
+            msg.noise_pattern === "NKpsk2" ? "NKpsk2" : undefined,
         };
         // beginHandshake is synchronous by design: both `state =
         // "handshaking"` and `this.handshake = ...` must be set before
@@ -284,6 +328,7 @@ export class RelayConnection {
   private beginHandshake(meta: PairedMeta): void {
     let pattern: Pattern;
     let remoteStaticPublicKey: Uint8Array | undefined;
+    let preSharedKey: Uint8Array | undefined;
 
     if (meta.client_public_key) {
       pattern = KK;
@@ -294,7 +339,30 @@ export class RelayConnection {
       // Synchronous: libsodium's Ed25519→Curve25519 is a pure call,
       // and `await sodium.ready` happened globally at daemon start.
       remoteStaticPublicKey = sodium.crypto_sign_ed25519_pk_to_curve25519(edBytes);
+    } else if (meta.noise_pattern === "NKpsk2") {
+      // Client signaled `?psk_required=1` at the WS upgrade. Refuse
+      // if we don't actually have a PSK loaded — better a clean
+      // construction-time error here than a confusing AEAD failure
+      // two messages in.
+      if (!this.auth.preSharedKey) {
+        const reason =
+          "client requested NKpsk2 but this daemon has no PSK configured (start with --psk-file or PTY_RELAY_PSK)";
+        this.auth.onPskAuthAttempt?.({ outcome: "fail", fingerprint: "-", reason });
+        throw new Error(reason);
+      }
+      pattern = NKpsk2;
+      preSharedKey = this.auth.preSharedKey;
+      this.pskAuthFingerprint = pskFingerprint(preSharedKey);
     } else {
+      // Plain NK pairing. If we have a PSK loaded, refuse — operator
+      // explicitly enabled PSK auth and a non-PSK client shouldn't
+      // be able to slip past it.
+      if (this.auth.preSharedKey) {
+        const reason =
+          "daemon has PSK configured; refusing non-PSK pairing (client must pass `?psk_required=1`)";
+        this.auth.onPskAuthAttempt?.({ outcome: "fail", fingerprint: "-", reason });
+        throw new Error(reason);
+      }
       pattern = NK;
     }
 
@@ -310,6 +378,7 @@ export class RelayConnection {
         privateKey: this.config.secretKey,
       },
       remoteStaticPublicKey,
+      preSharedKey,
     });
     this.state = "handshaking";
     log("ws-pair", "handshake begin", { pattern: pattern.name });
@@ -330,9 +399,25 @@ export class RelayConnection {
         log("ws-pair", "handshake complete + welcome sent", {
           welcomeBytes: welcome.length,
         });
+        if (this.pskAuthFingerprint) {
+          this.auth.onPskAuthAttempt?.({
+            outcome: "ok",
+            fingerprint: this.pskAuthFingerprint,
+          });
+          this.pskAuthFingerprint = null;
+        }
         this.events.onHandshakeComplete(this.transport);
       } catch (err) {
-        log("ws-pair", "handshake failed", { error: (err as any)?.message ?? String(err) });
+        const message = (err as any)?.message ?? String(err);
+        log("ws-pair", "handshake failed", { error: message });
+        if (this.pskAuthFingerprint) {
+          this.auth.onPskAuthAttempt?.({
+            outcome: "fail",
+            fingerprint: this.pskAuthFingerprint,
+            reason: message,
+          });
+          this.pskAuthFingerprint = null;
+        }
         this.events.onError(
           err instanceof Error ? err : new Error(`Handshake failed: ${err}`)
         );
