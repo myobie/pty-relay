@@ -14,7 +14,7 @@
  * minimal output parser.
  */
 
-import { execFile } from "node:child_process";
+import { execFile, spawn as childSpawn, type ChildProcess } from "node:child_process";
 import { promisify } from "node:util";
 import type { RemoteSession } from "./relay-client.ts";
 import { log } from "../log.ts";
@@ -203,6 +203,273 @@ export async function probeSshPeer(sshUrl: string): Promise<string> {
   } catch (err) {
     throw translateSshError(err, sshUrl);
   }
+}
+
+/**
+ * Run `ssh <userHost> pty peek <session> …` and return the screen as a
+ * string. Mirrors `peekRemoteSession`'s shape so `peek.ts`'s dispatch
+ * stays clean.
+ */
+export async function peekSshRemoteSession(
+  sshUrl: string,
+  session: string,
+  opts: {
+    plain?: boolean;
+    full?: boolean;
+    wait?: string[];
+    timeoutSec?: number;
+  } = {},
+): Promise<{ screen: string }> {
+  const parsed = parseSshUrl(sshUrl);
+  log("ssh", "peek begin", { userHost: parsed.userHost, session });
+  const remote: string[] = ["pty", "peek"];
+  if (opts.plain) remote.push("--plain");
+  if (opts.full) remote.push("--full");
+  if (opts.wait && opts.wait.length > 0) {
+    for (const w of opts.wait) remote.push("--wait", w);
+  }
+  if (opts.timeoutSec) remote.push("-t", String(opts.timeoutSec));
+  remote.push(session);
+  const args = [...baseSshArgs(parsed), parsed.userHost, ...remote];
+  // Per-call timeout outlives any --wait poll the remote pty does. Add
+  // 5s grace so we always lose the race to remote pty's own timeout.
+  const timeoutMs =
+    opts.wait && opts.wait.length > 0
+      ? (opts.timeoutSec ? opts.timeoutSec * 1000 : 60_000) + 5_000
+      : 15_000;
+  try {
+    const { stdout } = await execFileAsync("ssh", args, {
+      timeout: timeoutMs,
+      encoding: "utf-8",
+      // peek output is bounded by the remote terminal's scrollback;
+      // 8 MB is more than any sane terminal but caps a runaway.
+      maxBuffer: 8 * 1024 * 1024,
+    });
+    return { screen: stdout };
+  } catch (err) {
+    throw translateSshError(err, sshUrl);
+  }
+}
+
+/**
+ * Run `ssh <userHost> pty send <session> …`. `pty send` takes one or
+ * more `--seq` flags for ordered input; the friend-facing `pty-relay
+ * send` already prepares these and hands us the list.
+ */
+export async function sendSshRemoteSession(
+  sshUrl: string,
+  session: string,
+  data: string[],
+  opts: { delayMs?: number; paste?: boolean } = {},
+): Promise<void> {
+  const parsed = parseSshUrl(sshUrl);
+  log("ssh", "send begin", { userHost: parsed.userHost, session, chunks: data.length });
+  const remote: string[] = ["pty", "send"];
+  for (const chunk of data) {
+    remote.push("--seq", chunk);
+  }
+  if (opts.delayMs !== undefined) {
+    remote.push("--with-delay", String(opts.delayMs / 1000));
+  }
+  if (opts.paste) remote.push("--paste");
+  remote.push(session);
+  const args = [...baseSshArgs(parsed), parsed.userHost, ...remote];
+  try {
+    await execFileAsync("ssh", args, {
+      timeout: 15_000,
+      encoding: "utf-8",
+    });
+  } catch (err) {
+    throw translateSshError(err, sshUrl);
+  }
+}
+
+/**
+ * Run `ssh <userHost> pty tag <session> …` and parse the JSON tag map
+ * the remote prints. Mirrors `tagRemoteSession`'s return shape.
+ */
+export async function tagSshRemoteSession(
+  sshUrl: string,
+  session: string,
+  opts: { set?: Record<string, string>; remove?: string[] } = {},
+): Promise<{ tags: Record<string, string> }> {
+  const parsed = parseSshUrl(sshUrl);
+  log("ssh", "tag begin", {
+    userHost: parsed.userHost,
+    session,
+    setCount: opts.set ? Object.keys(opts.set).length : 0,
+    removeCount: opts.remove?.length ?? 0,
+  });
+  const remote: string[] = ["pty", "tag", "--json", session];
+  for (const k of opts.remove ?? []) {
+    remote.push("--rm", k);
+  }
+  for (const [k, v] of Object.entries(opts.set ?? {})) {
+    remote.push(`${k}=${v}`);
+  }
+  const args = [...baseSshArgs(parsed), parsed.userHost, ...remote];
+  let stdout: string;
+  try {
+    const result = await execFileAsync("ssh", args, {
+      timeout: 15_000,
+      encoding: "utf-8",
+    });
+    stdout = result.stdout;
+  } catch (err) {
+    throw translateSshError(err, sshUrl);
+  }
+  let tags: unknown;
+  try {
+    tags = JSON.parse(stdout);
+  } catch {
+    throw new Error(
+      `pty tag --json on ${sshUrl} returned non-JSON output. Is pty up-to-date on the remote?`,
+    );
+  }
+  if (typeof tags !== "object" || tags === null || Array.isArray(tags)) {
+    throw new Error(
+      `pty tag --json on ${sshUrl} returned ${Array.isArray(tags) ? "array" : typeof tags}, expected an object.`,
+    );
+  }
+  return { tags: tags as Record<string, string> };
+}
+
+/**
+ * Run `ssh <userHost> pty kill <session>`. The remote pty CLI handles
+ * the actual termination; we just propagate exit + stderr.
+ */
+export async function killSshRemoteSession(
+  sshUrl: string,
+  session: string,
+): Promise<void> {
+  const parsed = parseSshUrl(sshUrl);
+  log("ssh", "kill begin", { userHost: parsed.userHost, session });
+  const args = [...baseSshArgs(parsed), parsed.userHost, "pty", "kill", session];
+  try {
+    await execFileAsync("ssh", args, {
+      timeout: 15_000,
+      encoding: "utf-8",
+    });
+  } catch (err) {
+    throw translateSshError(err, sshUrl);
+  }
+}
+
+/** Stop a long-lived follow handle returned by `followSshRemoteEvents`. */
+export interface SshEventsSubscription {
+  /** Terminate the remote-side pty events stream + close ssh. */
+  close(): void;
+}
+
+/**
+ * Spawn `ssh <userHost> pty events --json [--session <name>]` and
+ * stream the JSONL output to `onEvent` for each parsed line. The
+ * handle's `close()` SIGINT-kills the ssh process, which the remote
+ * pty translates into a clean events-stream shutdown.
+ *
+ * No reconnect loop here — ssh's own retry semantics are the right
+ * tool. If the operator wants persistence, they wrap `pty-relay
+ * events <peer>` in a supervisor (e.g. systemd Restart=always).
+ */
+export function followSshRemoteEvents(
+  sshUrl: string,
+  opts: {
+    session?: string;
+    onEvent: (evt: unknown) => void;
+    onError: (err: Error) => void;
+    onExit: (code: number | null) => void;
+  },
+): SshEventsSubscription {
+  const parsed = parseSshUrl(sshUrl);
+  log("ssh", "events follow begin", {
+    userHost: parsed.userHost,
+    session: opts.session,
+  });
+  const remote: string[] = ["pty", "events", "--json"];
+  if (opts.session) {
+    remote.push("--session", opts.session);
+  }
+  const args = [...baseSshArgs(parsed), parsed.userHost, ...remote];
+  const child = childSpawn("ssh", args, {
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+
+  let buf = "";
+  child.stdout?.setEncoding("utf-8");
+  child.stdout?.on("data", (chunk: string) => {
+    buf += chunk;
+    // JSONL — emit one event per newline.
+    let idx: number;
+    while ((idx = buf.indexOf("\n")) >= 0) {
+      const line = buf.slice(0, idx).trim();
+      buf = buf.slice(idx + 1);
+      if (line.length === 0) continue;
+      try {
+        opts.onEvent(JSON.parse(line));
+      } catch (err: any) {
+        opts.onError(
+          new Error(`bad JSON from ${sshUrl}: ${err?.message ?? err}`),
+        );
+      }
+    }
+  });
+
+  let stderrBuf = "";
+  child.stderr?.setEncoding("utf-8");
+  child.stderr?.on("data", (chunk: string) => {
+    stderrBuf += chunk;
+    // Keep the buffer bounded — pre-translation in close handler.
+    if (stderrBuf.length > 4096) stderrBuf = stderrBuf.slice(-4096);
+  });
+
+  child.on("error", (err: Error) => {
+    opts.onError(err);
+  });
+
+  child.on("close", (code) => {
+    if (code !== 0 && code !== null && stderrBuf.trim().length > 0) {
+      // Run the same translation as one-shot ssh calls so the operator
+      // sees the same friendly hints (pty-not-found, host-unreachable).
+      opts.onError(
+        translateSshError({ stderr: stderrBuf, message: `ssh exited ${code}` }, sshUrl),
+      );
+    }
+    opts.onExit(code);
+  });
+
+  return {
+    close(): void {
+      if (!child.killed) {
+        try { child.kill("SIGINT"); } catch {}
+      }
+    },
+  };
+}
+
+/**
+ * Spawn `ssh -t <userHost> pty attach <session>` with inherited stdio.
+ * `-t` forces TTY allocation so the remote pty sees a real terminal
+ * and can drive the alt-screen / cursor / sigwinch dance. Returns a
+ * Promise that resolves with the child's exit code (or null on a
+ * signal) so the caller can `process.exit(code)`.
+ */
+export function attachSshRemoteSession(
+  sshUrl: string,
+  session: string,
+): Promise<number | null> {
+  const parsed = parseSshUrl(sshUrl);
+  log("ssh", "attach begin", { userHost: parsed.userHost, session });
+  // `-t` is the load-bearing flag here — without it, ssh refuses to
+  // allocate a remote PTY for a non-interactive stdin, and `pty
+  // attach` ends up wedged. The phase-1 design doc calls this out.
+  const args = ["-t", ...baseSshArgs(parsed), parsed.userHost, "pty", "attach", session];
+  const child: ChildProcess = childSpawn("ssh", args, {
+    stdio: "inherit",
+  });
+  return new Promise((resolve) => {
+    child.on("error", () => resolve(255));
+    child.on("close", (code) => resolve(code));
+  });
 }
 
 /**

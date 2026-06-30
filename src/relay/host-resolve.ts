@@ -1,6 +1,6 @@
 import sodium from "libsodium-wrappers-sumo";
 import {
-  loadKnownHosts,
+  loadAllKnownHosts,
   isPublicHost,
   isSshHost,
   type KnownHost,
@@ -64,7 +64,7 @@ export async function resolveHost(
   label: string,
   store: SecretStore
 ): Promise<ResolvedHost> {
-  const hosts = await loadKnownHosts(store);
+  const hosts = await loadAllKnownHosts(store);
   const host = hosts.find((h) => h.label === label);
   if (!host) {
     log("hosts", "resolve miss", { label, known: hosts.length });

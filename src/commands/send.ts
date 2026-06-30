@@ -3,7 +3,8 @@ import {
   sendToRemoteSession,
   sendToPublicRemoteSession,
 } from "../relay/relay-client.ts";
-import { resolveHost, requireRelayHost } from "../relay/host-resolve.ts";
+import { sendSshRemoteSession } from "../relay/transport-ssh.ts";
+import { resolveHost } from "../relay/host-resolve.ts";
 import { openSecretStore } from "../storage/bootstrap.ts";
 import { log } from "../log.ts";
 
@@ -43,8 +44,9 @@ export async function send(
   const sendOpts = { delayMs: opts.delayMs, paste: opts.paste };
   if (resolved.kind === "public") {
     await sendToPublicRemoteSession(resolved.target, session, data, sendOpts);
+  } else if (resolved.kind === "ssh") {
+    await sendSshRemoteSession(resolved.sshUrl, session, data, sendOpts);
   } else {
-    const relayHost = requireRelayHost(resolved, "send");
-    await sendToRemoteSession(relayHost.url, session, data, sendOpts);
+    await sendToRemoteSession(resolved.url, session, data, sendOpts);
   }
 }

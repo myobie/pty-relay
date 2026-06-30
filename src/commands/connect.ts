@@ -72,7 +72,7 @@ export async function connect(
     if (passphrase && !process.env.PTY_RELAY_PASSPHRASE) {
       process.env.PTY_RELAY_PASSPHRASE = passphrase;
     }
-    const { resolveHost, requireRelayHost } = await import("../relay/host-resolve.ts");
+    const { resolveHost } = await import("../relay/host-resolve.ts");
     const resolved = await resolveHost(tokenUrlOrLabel, store);
     if (resolved.kind === "public") {
       const { connectPublic } = await import("./connect-public.ts");
@@ -83,9 +83,26 @@ export async function connect(
       });
       return;
     }
-    const relayHost = requireRelayHost(resolved, "connect");
+    if (resolved.kind === "ssh") {
+      // ssh peers don't go through the encrypted-channel + reconnect
+      // machinery — `ssh -t host pty attach <session>` already gives
+      // us a real TTY with ssh's transport reliability. We need a
+      // session name (no list-and-pick over ssh yet — the operator can
+      // run `pty-relay ls <ssh-peer>` and re-invoke).
+      const sessionName = options?.spawn ?? options?.session;
+      if (!sessionName) {
+        console.error(
+          `connect to ssh peer "${tokenUrlOrLabel}" needs --session <name>. ` +
+            `Run \`pty-relay ls ${tokenUrlOrLabel}\` to discover names.`,
+        );
+        process.exit(1);
+      }
+      const { attachSshRemoteSession } = await import("../relay/transport-ssh.ts");
+      const code = await attachSshRemoteSession(resolved.sshUrl, sessionName);
+      process.exit(code ?? 0);
+    }
     // Self-hosted label → look up the stored URL and fall through.
-    tokenUrlOrLabel = relayHost.url;
+    tokenUrlOrLabel = resolved.url;
   }
 
   const tokenUrl = tokenUrlOrLabel;
