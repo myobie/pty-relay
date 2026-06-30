@@ -302,3 +302,70 @@ async function persist(hosts: KnownHost[], store: SecretStore): Promise<void> {
     new TextEncoder().encode(JSON.stringify(hosts))
   );
 }
+
+/**
+ * Read entries from BOTH the encrypted store and the declarative
+ * peers file (see `peers-file.ts`), merging on label. Encrypted-store
+ * entries WIN on collisions — the operator explicitly saved them via
+ * `connect` / `add` / `server signin`, so an accidental peers-file
+ * line with the same label shouldn't shadow them. peers-file entries
+ * that collide get a `-2`/`-3`/… numeric suffix so they remain
+ * reachable.
+ *
+ * Read every time so a freshly-dropped peers file works with zero
+ * setup — no daemon restart, no cache invalidation. The encrypted
+ * load is already the bottleneck (sodium decrypt); a few extra
+ * stat()s for the peers file are negligible.
+ *
+ * Every read-only consumer (`ls`, `peek`, `send`, `tag`, `events`,
+ * `connect`, `resolveHost`) should use this. Write paths (save /
+ * remove / rename) keep using `loadKnownHosts` since they only
+ * touch the encrypted store.
+ */
+export async function loadAllKnownHosts(
+  store: SecretStore,
+): Promise<KnownHost[]> {
+  // Imported lazily so the encrypted-store-only path doesn't need to
+  // pull in the peers-file module for write operations.
+  const { loadPeersFile } = await import("./peers-file.ts");
+  const stored = await loadKnownHosts(store);
+  const fromFile = loadPeersFile();
+  if (fromFile.length === 0) return stored;
+
+  const storedLabels = new Set(stored.map((h) => h.label));
+  const merged: KnownHost[] = [...stored];
+  let shadowed = 0;
+  let renamed = 0;
+
+  for (const candidate of fromFile) {
+    if (storedLabels.has(candidate.label)) {
+      // Same label as an explicit store entry. Keep the store row,
+      // skip the file row entirely — the operator probably forgot to
+      // remove a peers-file line for a host they later added via the
+      // imperative flow. Surfacing both is worse than silently
+      // preferring the explicit one.
+      shadowed++;
+      continue;
+    }
+    // Numeric suffix to avoid collisions between MULTIPLE peers-file
+    // entries that happen to share a label (rare but possible when
+    // explicit labels are used).
+    let label = candidate.label;
+    if (merged.some((h) => h.label === label)) {
+      let n = 2;
+      while (merged.some((h) => h.label === `${candidate.label}-${n}`)) n++;
+      label = `${candidate.label}-${n}`;
+      renamed++;
+    }
+    merged.push({ ...candidate, label });
+  }
+
+  log("hosts", "load merged", {
+    stored: stored.length,
+    file: fromFile.length,
+    shadowed,
+    renamed,
+    total: merged.length,
+  });
+  return merged;
+}

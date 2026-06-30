@@ -1,7 +1,7 @@
 import { matchesAllTags } from "@myobie/pty/client";
 import { ready } from "../crypto/index.ts";
 import {
-  loadKnownHosts,
+  loadAllKnownHosts,
   isPublicHost,
   isSshHost,
 } from "../relay/known-hosts.ts";
@@ -45,7 +45,7 @@ export async function ls(
     interactive: true,
     passphraseFile: opts?.passphraseFile,
   });
-  const hosts = await loadKnownHosts(store);
+  const hosts = await loadAllKnownHosts(store);
   const filterTags = opts?.filterTags ?? {};
   const hasFilter = Object.keys(filterTags).length > 0;
 

@@ -47,6 +47,7 @@ Commands:
   send ... --seq "text" --seq key:return       Send an ordered sequence (keys resolved)
   send ... --with-delay <seconds>              Delay between --seq items
   send ... --paste                             Wrap payload in bracketed-paste markers
+  kill <host> <session>     Terminate a session on a remote ssh:// peer
   tag <host> <session>                         Show tags on a remote session
   tag <host> <session> k=v [k=v…]              Set tags
   tag <host> <session> --rm k [...]            Remove tags
@@ -146,9 +147,20 @@ Options:
   --verbose                 Print timing + internal state to stderr
                              (also honored via PTY_RELAY_VERBOSE=1)
 
+Files:
+  ~/.config/pty-relay/peers Declarative peers list (one URL per line, optional
+                              "<url>  <label>"). ssh://[user@]host[:port] OR
+                              http(s)://host#pk.secret. Read at command time
+                              so a freshly-dropped file works with zero setup.
+                              $XDG_CONFIG_HOME/pty-relay/peers takes priority
+                              if XDG_CONFIG_HOME is set; PTY_RELAY_PEERS_FILE
+                              overrides both (intended for tests).
+
 Environment:
   PTY_RELAY_PASSPHRASE      Passphrase (non-interactive)
   PTY_RELAY_KDF_PROFILE     KDF profile: moderate (default) | interactive
+  PTY_RELAY_PSK             32-byte URL-safe-base64 PSK (alternative to --psk-file)
+  PTY_RELAY_PEERS_FILE      Override the peers-file path (testing/non-XDG layouts)
 `);
 }
 
@@ -251,7 +263,26 @@ async function main(): Promise<void> {
 
   switch (command) {
     case "connect": {
-      const tokenUrlOrLabel = args[1];
+      // Strip flag-with-value pairs so the host-or-token arg can land
+      // anywhere on the command line (matches peek/tag/etc. parser
+      // shape; otherwise `connect --config-dir <dir> <host>` puts the
+      // flag in `args[1]` and treats it as the URL).
+      const connectArgs = args.slice(1);
+      const positional: string[] = [];
+      for (let i = 0; i < connectArgs.length; i++) {
+        const a = connectArgs[i];
+        if (
+          a === "--config-dir" ||
+          a === "--passphrase-file" ||
+          a === "--psk-file" ||
+          a === "--spawn" ||
+          a === "--cwd" ||
+          a === "--session"
+        ) { i++; continue; }
+        if (a.startsWith("--") || a.startsWith("-")) continue;
+        positional.push(a);
+      }
+      const tokenUrlOrLabel = positional[0];
       if (!tokenUrlOrLabel) {
         console.error("Usage: pty-relay connect <token-url-or-host-label> [--session <name>]");
         process.exit(1);
@@ -427,6 +458,32 @@ async function main(): Promise<void> {
       const configDir = getFlag("--config-dir") ?? undefined;
       const { send } = await import("./commands/send.ts");
       await send(hostLabel, session, data, { delayMs, paste, configDir, passphraseFile });
+      break;
+    }
+
+    case "kill": {
+      // Shape: pty-relay kill <host> <session>. ssh:// peers are the
+      // friend's blocker (brief-015); self-hosted/public peers throw
+      // "not yet supported" from the command itself with a hint.
+      // Consume known flag-with-value pairs so they don't drift into
+      // the positional slot (matches peek/tag/etc. parser shape).
+      const killArgs = args.slice(1);
+      const positional: string[] = [];
+      for (let i = 0; i < killArgs.length; i++) {
+        const a = killArgs[i];
+        if (a === "--config-dir" || a === "--passphrase-file") { i++; continue; }
+        if (a.startsWith("--") || a.startsWith("-")) continue;
+        positional.push(a);
+      }
+      const hostLabel = positional[0];
+      const session = positional[1];
+      if (!hostLabel || !session) {
+        console.error("Usage: pty-relay kill <host> <session>");
+        process.exit(1);
+      }
+      const configDir = getFlag("--config-dir") ?? undefined;
+      const { killCommand } = await import("./commands/kill.ts");
+      await killCommand(hostLabel, session, { configDir, passphraseFile });
       break;
     }
 

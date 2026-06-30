@@ -3,7 +3,8 @@ import {
   tagRemoteSession,
   tagPublicRemoteSession,
 } from "../relay/relay-client.ts";
-import { resolveHost, requireRelayHost } from "../relay/host-resolve.ts";
+import { tagSshRemoteSession } from "../relay/transport-ssh.ts";
+import { resolveHost } from "../relay/host-resolve.ts";
 import { openSecretStore } from "../storage/bootstrap.ts";
 import { log } from "../log.ts";
 
@@ -40,14 +41,14 @@ export async function tag(
   }
 
   const tagOpts = { set: opts.set, remove: opts.remove };
-  const result =
-    resolved.kind === "public"
-      ? await tagPublicRemoteSession(resolved.target, session, tagOpts)
-      : await tagRemoteSession(
-          requireRelayHost(resolved, "tag").url,
-          session,
-          tagOpts,
-        );
+  let result: { tags: Record<string, string> };
+  if (resolved.kind === "public") {
+    result = await tagPublicRemoteSession(resolved.target, session, tagOpts);
+  } else if (resolved.kind === "ssh") {
+    result = await tagSshRemoteSession(resolved.sshUrl, session, tagOpts);
+  } else {
+    result = await tagRemoteSession(resolved.url, session, tagOpts);
+  }
 
   if (opts.json) {
     console.log(JSON.stringify(result.tags, null, 2));

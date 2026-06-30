@@ -6,7 +6,8 @@ import {
   type SubscribeRemoteEventsOptions,
   type RemoteEventsSubscription,
 } from "../relay/events-client.ts";
-import { resolveHost, requireRelayHost } from "../relay/host-resolve.ts";
+import { followSshRemoteEvents } from "../relay/transport-ssh.ts";
+import { resolveHost } from "../relay/host-resolve.ts";
 import { openSecretStore } from "../storage/bootstrap.ts";
 import { log } from "../log.ts";
 
@@ -97,12 +98,44 @@ export async function follow(hostLabel: string, opts: EventsOpts): Promise<void>
     },
   };
 
+  if (resolved.kind === "ssh") {
+    // ssh peers stream JSONL straight from `pty events --json` on the
+    // remote — no relay involvement. The remote's pty handles
+    // reconnects for its own followers; here we don't retry, ssh's
+    // single-process lifetime is the natural scope.
+    const sshSub = followSshRemoteEvents(resolved.sshUrl, {
+      session: opts.session,
+      onEvent: (evt) => {
+        const evtRecord = evt as EventRecord;
+        if (sessionFilter && evtRecord.session !== sessionFilter) return;
+        if (opts.json) {
+          process.stdout.write(JSON.stringify(evtRecord) + "\n");
+        } else {
+          printHuman(evtRecord);
+        }
+      },
+      onError: (err) => {
+        log("events", "ssh stream error", { message: err.message });
+        process.stderr.write(`[events] ${err.message}\n`);
+      },
+      onExit: (code) => {
+        log("events", "ssh stream exit", { code });
+        process.exit(code ?? 0);
+      },
+    });
+    process.on("SIGINT", () => {
+      sshSub.close();
+      process.exit(0);
+    });
+    await new Promise<void>(() => {});
+    return;
+  }
+
   let subscription: RemoteEventsSubscription;
   if (resolved.kind === "public") {
     subscription = subscribePublicRemoteEvents(resolved.target, subOpts);
   } else {
-    const relayHost = requireRelayHost(resolved, "events");
-    subscription = subscribeRemoteEvents(relayHost.url, subOpts);
+    subscription = subscribeRemoteEvents(resolved.url, subOpts);
   }
 
   // Keep the process alive until Ctrl+C.

@@ -227,12 +227,63 @@ doctor                          Print environment / diagnostics
 set-name <label>                Set the label this daemon advertises
 clients                         Interactive client-approval TUI (self-hosted)
 clients list | approve | revoke | invite
+psk-gen                         Print a fresh PSK (for --psk-file / PTY_RELAY_PSK)
+kill <host> <session>           Terminate a remote session over ssh://
 version                         Print the version
 
 Global flags:
   --config-dir <dir>              Override config directory
   --passphrase-file <path>        Passphrase from file (non-interactive)
+  --psk-file <path>               Load a Noise_NKpsk2 pre-shared key
 ```
+
+### Peers file — declarative provisioning
+
+For fleet-style setups (config-management drops a config file on every
+machine, peers Just Work™), pty-relay reads a peers list at command
+time. No `add` calls, no daemon restart, no encrypted-store
+mutation — drop a file at the documented path and `ls`/`peek`/`send`/
+`tag`/`kill`/`events`/`connect` discover the peers automatically.
+
+**Path** (first found wins):
+
+1. `$PTY_RELAY_PEERS_FILE` — explicit override (for tests / unusual
+   layouts).
+2. `$XDG_CONFIG_HOME/pty-relay/peers` — canonical XDG.
+3. `~/.config/pty-relay/peers` — fallback when `XDG_CONFIG_HOME` is
+   unset.
+
+**Format** — one entry per line, blank lines + `# comments` ignored:
+
+```
+# Each line is either:
+#   <url>                    — peer with auto-derived label (hostname)
+#   <url>  <label>            — peer with explicit label
+
+ssh://web1.example.com
+ssh://nathan@web2.example.com:2222     prod-web-2
+ssh://db1.example.com                  primary-db
+
+# https://#pk.secret URLs work too (token-URL form from `pty-relay
+# local start`'s output) — same line grammar, label defaults to host.
+https://relay.example.com#PUBLICKEY.SECRET            home-relay
+```
+
+URL kinds:
+
+- `ssh://[user@]host[:port]` — peer where `pty` runs and ssh handles
+  auth + transport. No relay daemon required. Subcommands shell out
+  to `ssh <host> pty <op>` directly. Needs `pty` on the remote's
+  PATH and ssh key-based auth (`BatchMode=yes` is forced).
+- `http(s)://host[:port][/session]#pk.secret[.token]` — the
+  self-hosted relay token URL. Same form `pty-relay local start`
+  prints, which is paste-friendly into the file.
+
+Encrypted-store entries (saved interactively via `add` / `connect` /
+`server signin`) **win** on label collisions; peers-file entries
+that collide get a numeric suffix (`web-2`, `web-3`) so every line
+stays reachable. Malformed lines are warned to stderr and skipped —
+a typo on line 7 doesn't take down the other 49 peers.
 
 ## Client approval (self-hosted)
 
